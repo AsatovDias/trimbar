@@ -1,6 +1,11 @@
+<p align="left">
+  <img src="docs/logo.svg" width="56" height="56" alt="Trimbar Logo" align="left" style="margin-right: 14px;" />
+</p>
+
 # Trimbar
 
 **Local-first Anthropic API reverse proxy and context telemetry CLI for Claude Code.**
+<br clear="left" />
 
 Trimbar sits transparently between the local [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI and `https://api.anthropic.com` — with **zero SSE buffering** (`<5ms` added latency), **zero external telemetry**, and **zero CGO** (single static Go binary backed by local SQLite in WAL mode).
 

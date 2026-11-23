@@ -169,7 +169,7 @@ func runDemo(ctx context.Context, cfg *config.Config, existingProxyURL, workDir 
 			modeLabel = styleOK.Render("Active Trimming (cache-safe)")
 		}
 		banner := []string{
-			styleBrand.Render("TRIMBAR DEMO") + " " + styleMuted.Render("· Simulated 6-turn Claude Code Session (no API key required)"),
+			renderBrandHeader("DEMO", "Simulated 6-turn Claude Code Session (no API key required)"),
 			"",
 			fmt.Sprintf("%s  %s", styleMuted.Render("Proxy:   "), styleOK.Render(targetProxyURL)),
 			fmt.Sprintf("%s  %s", styleMuted.Render("Mock API:"), mockUpstream.URL),

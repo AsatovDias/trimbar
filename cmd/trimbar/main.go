@@ -24,14 +24,15 @@ import (
 	"github.com/trimbar/trimbar/internal/webui"
 )
 
-var version = "0.3.0"
+var version = "0.3.1"
 
 // Lipgloss styles for terminal output.
 var (
-	styleBrand = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	styleBrand = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F3F1ED"))
+	styleLime  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#C4F82A"))
 	styleTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86"))
 	styleMuted = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	styleOK    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	styleOK    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#C4F82A"))
 	styleWarn  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
 	styleErr   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
 	styleBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
@@ -39,8 +40,14 @@ var (
 
 	styleBanner = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("63")).
+			BorderForeground(lipgloss.Color("#3D4B24")).
 			Padding(0, 2)
+
+	styleLogoBox = lipgloss.NewStyle().
+			Background(lipgloss.Color("#0E1015")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#2A303D")).
+			Padding(0, 1)
 
 	styleCard = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -55,6 +62,31 @@ var (
 				BorderBottom(true).
 				BorderForeground(lipgloss.Color("240"))
 )
+
+// renderBrandHeader renders the signature 3-row Trimbar logo badge next to title & subtitle.
+func renderBrandHeader(title, subtitle string) string {
+	bg := lipgloss.Color("#0E1015")
+	light := lipgloss.NewStyle().Foreground(lipgloss.Color("#F3F1ED")).Background(bg)
+	dot := lipgloss.NewStyle().Foreground(lipgloss.Color("#454749")).Background(bg)
+	lime := lipgloss.NewStyle().Foreground(lipgloss.Color("#C4F82A")).Background(bg)
+	olive := lipgloss.NewStyle().Foreground(lipgloss.Color("#3D4B24")).Background(bg)
+	gap := lipgloss.NewStyle().Background(bg)
+
+	row1 := light.Render("━━━━━━━━━━━")
+	row2 := light.Render("━━━━━━━━") + gap.Render("  ") + dot.Render("●")
+	row3 := lime.Render("━━━━━") + gap.Render(" ") + olive.Render("━━━━━")
+
+	logo := styleLogoBox.Render(strings.Join([]string{row1, row2, row3}, "\n"))
+	wordmark := styleBrand.Render("TRIM") + styleLime.Render("BAR")
+	if title != "" {
+		wordmark += " " + styleBrand.Render(title)
+	}
+	textBlock := lipgloss.JoinVertical(lipgloss.Left,
+		wordmark,
+		styleMuted.Render(subtitle),
+	)
+	return lipgloss.JoinHorizontal(lipgloss.Center, logo, "  ", textBlock)
+}
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -180,7 +212,7 @@ func newStartCmd() *cobra.Command {
 				modeLabel = styleOK.Render("Active Trimming (cache-safe)")
 			}
 			bannerLines := []string{
-				styleBrand.Render("TRIMBAR") + " " + styleMuted.Render("v"+version+" · Claude Code Local Gateway"),
+				renderBrandHeader("", "v"+version+" · Claude Code Local Gateway"),
 				"",
 				fmt.Sprintf("%s  %s", styleMuted.Render("Listen:  "), styleOK.Render(listenURL)),
 				fmt.Sprintf("%s  %s", styleMuted.Render("Web UI:  "), styleTitle.Render(webUIURL)),

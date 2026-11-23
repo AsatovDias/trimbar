@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Trimbar logo">
+  <rect x="2" y="2" width="124" height="124" rx="28" fill="#0E1015" stroke="#252A36" stroke-width="3"/>
+  <!-- Row 1: Full-width light bar -->
+  <rect x="20" y="23" width="88" height="18" rx="9" fill="#F3F1ED"/>
+  <!-- Row 2: ~72% light bar + dark dot -->
+  <rect x="20" y="55" width="63" height="18" rx="9" fill="#F3F1ED"/>
+  <circle cx="99" cy="64" r="9" fill="#454749"/>
+  <!-- Row 3: ~48% acid-lime bar + ~48% dark-olive bar -->
+  <rect x="20" y="87" width="41" height="18" rx="9" fill="#C4F82A"/>
+  <rect x="67" y="87" width="41" height="18" rx="9" fill="#3D4B24"/>
+</svg>

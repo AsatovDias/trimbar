@@ -110,6 +110,12 @@ func TestWebUIServesOfflineDashboardAndAPIs(t *testing.T) {
 	if !strings.Contains(html, "Context Flamegraph") || !strings.Contains(html, "/api/stats") || !strings.Contains(html, "/api/inspect") {
 		t.Errorf("GET /ui HTML missing expected dashboard sections")
 	}
+	if !strings.Contains(html, `rel="icon" type="image/svg+xml" href="data:image/svg+xml,`) {
+		t.Errorf("GET /ui HTML missing inline SVG favicon")
+	}
+	if !strings.Contains(html, "#C4F82A") || !strings.Contains(html, "#3D4B24") || !strings.Contains(html, "#F3F1ED") {
+		t.Errorf("GET /ui HTML missing Trimbar brand SVG palette")
+	}
 	// Strictly verify zero external CDN script/stylesheet links for 100% offline operation.
 	if strings.Contains(html, "https://cdn.") || strings.Contains(html, "https://fonts.") || strings.Contains(html, "unpkg.com") {
 		t.Errorf("GET /ui HTML must not reference external CDNs")
