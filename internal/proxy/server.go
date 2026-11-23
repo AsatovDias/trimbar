@@ -31,13 +31,22 @@ func NewServer(cfg *config.Config, opts ...HandlerOption) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_trimbar/health", handleHealth)
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	if h.uiHandler != nil {
 		mux.Handle("/ui", h.uiHandler)
 		mux.Handle("/ui/", h.uiHandler)
 		mux.Handle("/api/stats", h.uiHandler)
 		mux.Handle("/api/inspect", h.uiHandler)
 	}
-	mux.Handle("/", h)
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.uiHandler != nil && r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			http.Redirect(w, r, "/ui", http.StatusFound)
+			return
+		}
+		h.ServeHTTP(w, r)
+	}))
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr(),

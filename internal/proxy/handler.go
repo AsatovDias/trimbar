@@ -344,9 +344,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) emit(ev ProxyEvent) {
-	if h.onComplete != nil {
-		h.onComplete(ev)
+	if h.onComplete == nil || !shouldLogTelemetryPath(ev.Path) {
+		return
 	}
+	h.onComplete(ev)
+}
+
+// shouldLogTelemetryPath ensures only real Anthropic API calls (/v1/*) are logged
+// and persisted to SQLite, filtering out browser noise (/, /favicon.ico, /ui/*).
+func shouldLogTelemetryPath(p string) bool {
+	return strings.HasPrefix(p, "/v1/")
 }
 
 func (h *Handler) hasFallback() bool {

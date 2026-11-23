@@ -85,12 +85,42 @@ func TestWebUIServesOfflineDashboardAndAPIs(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.UpstreamURL = upstream.URL
-	srv, err := proxy.NewServer(cfg, proxy.WithWebUI(ui))
+	telemetryEvents := 0
+	srv, err := proxy.NewServer(cfg,
+		proxy.WithWebUI(ui),
+		proxy.WithOnComplete(func(ev proxy.ProxyEvent) {
+			telemetryEvents++
+		}),
+	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 	ts := httptest.NewServer(srv.ServeMux())
 	defer ts.Close()
+
+	// 0. GET / redirects 302 -> /ui and GET /favicon.ico returns 204 without telemetry or upstream hit
+	noFollowClient := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	rootResp, err := noFollowClient.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	_ = rootResp.Body.Close()
+	if rootResp.StatusCode != http.StatusFound || rootResp.Header.Get("Location") != "/ui" {
+		t.Errorf("GET / = (%d, Location=%q), want (302, /ui)", rootResp.StatusCode, rootResp.Header.Get("Location"))
+	}
+
+	favResp, err := noFollowClient.Get(ts.URL + "/favicon.ico")
+	if err != nil {
+		t.Fatalf("GET /favicon.ico: %v", err)
+	}
+	_ = favResp.Body.Close()
+	if favResp.StatusCode != http.StatusNoContent {
+		t.Errorf("GET /favicon.ico = %d, want 204", favResp.StatusCode)
+	}
 
 	// 1. GET /ui returns embedded offline HTML dashboard
 	resp, err := http.Get(ts.URL + "/ui")
@@ -156,5 +186,8 @@ func TestWebUIServesOfflineDashboardAndAPIs(t *testing.T) {
 	}
 	if report.TotalTrimmedTokens != 1540 {
 		t.Errorf("report.TotalTrimmedTokens = %d, want 1540", report.TotalTrimmedTokens)
+	}
+	if telemetryEvents != 0 {
+		t.Errorf("expected 0 telemetry events for /, /favicon.ico, /ui, /api/*, got %d", telemetryEvents)
 	}
 }
