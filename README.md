@@ -29,12 +29,16 @@ When running Claude Code on real repositories, token burn and latency spikes are
 
 ## Quickstart
 
+### Download Prebuilt Binary (Windows)
+
+Download `trimbar.exe` (windows-amd64) directly from the [GitHub Releases](https://github.com/AsatovDias/trimbar/releases/latest) page.
+
 ### Build from Source
 
 Requires **Go 1.23+** (no C compiler / CGO required):
 
 ```bash
-git clone https://github.com/trimbar/trimbar.git
+git clone https://github.com/AsatovDias/trimbar.git
 cd trimbar
 CGO_ENABLED=0 go build -o trimbar ./cmd/trimbar
 ```
@@ -87,6 +91,8 @@ Want to watch live streaming telemetry inside `trimbar start`? Open two terminal
 ---
 
 ## Example CLI Output
+
+> **Tip:** You can reproduce this exact live output locally in one command — **no Anthropic API key required** — by running `trimbar demo` followed by `trimbar stats` and `trimbar inspect`.
 
 ### `trimbar stats`
 
@@ -238,4 +244,4 @@ The test suite verifies:
 
 ## License
 
-MIT
+Licensed under the [Apache License 2.0](LICENSE).
