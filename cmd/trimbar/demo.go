@@ -42,9 +42,10 @@ type demoMockUsage struct {
 
 func newDemoCmd() *cobra.Command {
 	var (
-		proxyURL string
-		dbPath   string
-		cwd      string
+		proxyURL    string
+		dbPath      string
+		cwd         string
+		trimEnabled bool
 	)
 
 	cmd := &cobra.Command{
@@ -54,10 +55,13 @@ func newDemoCmd() *cobra.Command {
 (including SSE streaming, prompt cache reads, Haiku sub-agent calls, duplicate Read calls,
 ANSI-polluted Bash output, and a mid-session Cache Miss Anomaly).
 
-By default, trimbar demo launches an ephemeral local mock Anthropic server and Trimbar proxy
-and persists telemetry into your SQLite database so you can immediately run:
+By default, trimbar demo runs in Shadow Mode (read-only) with an ephemeral local mock
+Anthropic server and Trimbar proxy, persisting telemetry into your SQLite database:
   trimbar stats
   trimbar inspect
+
+Pass --trim to test Cache-Safe Active Trimming on post-cache_control tool_results:
+  trimbar demo --trim
 
 To watch live telemetry in a separate terminal running "trimbar start --mock", pass:
   trimbar demo --proxy http://127.0.0.1:8787`,
@@ -68,6 +72,9 @@ To watch live telemetry in a separate terminal running "trimbar start --mock", p
 			}
 			if dbPath != "" {
 				cfg.DBPath = dbPath
+			}
+			if cmd.Flags().Changed("trim") {
+				cfg.TrimEnabled = trimEnabled
 			}
 			workDir := cwd
 			if workDir == "" {
@@ -80,6 +87,7 @@ To watch live telemetry in a separate terminal running "trimbar start --mock", p
 	cmd.Flags().StringVar(&proxyURL, "proxy", "", "Send demo traffic to an already-running Trimbar proxy (e.g. http://127.0.0.1:8787 started with --mock)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Path to SQLite database (standalone mode; default ~/.trimbar/trimbar.db)")
 	cmd.Flags().StringVar(&cwd, "cwd", "", "Working directory injected into Claude Code system prompt (default current directory)")
+	cmd.Flags().BoolVar(&trimEnabled, "trim", false, "Enable cache-safe active trimming during the demo run")
 	return cmd
 }
 
@@ -113,8 +121,15 @@ func runDemo(ctx context.Context, cfg *config.Config, existingProxyURL, workDir 
 		proxyCfg := *cfg
 		proxyCfg.UpstreamURL = mockUpstream.URL
 
+		var (
+			totalTrimmedTokens int
+			totalTrimmedUSD    float64
+		)
+
 		srv, err := proxy.NewServer(&proxyCfg, proxy.WithOnComplete(func(ev proxy.ProxyEvent) {
 			rec := buildRequestLog(ev, resolver, repo)
+			totalTrimmedTokens += rec.TrimmedTokens
+			totalTrimmedUSD += rec.TrimmedSavingsUSD
 			writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if _, err := repo.InsertRequest(writeCtx, rec); err != nil {
@@ -138,15 +153,27 @@ func runDemo(ctx context.Context, cfg *config.Config, existingProxyURL, workDir 
 		defer func() {
 			cancelProxy()
 			<-serveDone
+			if proxyCfg.TrimEnabled && totalTrimmedTokens > 0 {
+				fmt.Printf("\n%s  %s (%s)\n",
+					styleTitle.Render("ACTUAL TRIMMED TOKENS & USD SAVED:"),
+					styleOK.Render(formatTokens(int64(totalTrimmedTokens))+" tokens"),
+					styleOK.Render(fmt.Sprintf("$%.4f USD saved", totalTrimmedUSD)),
+				)
+			}
 		}()
 
 		targetProxyURL = "http://" + ln.Addr().String()
 
+		modeLabel := styleMuted.Render("Shadow Mode (read-only)")
+		if proxyCfg.TrimEnabled {
+			modeLabel = styleOK.Render("Active Trimming (cache-safe)")
+		}
 		banner := []string{
 			styleBrand.Render("TRIMBAR DEMO") + " " + styleMuted.Render("· Simulated 6-turn Claude Code Session (no API key required)"),
 			"",
 			fmt.Sprintf("%s  %s", styleMuted.Render("Proxy:   "), styleOK.Render(targetProxyURL)),
 			fmt.Sprintf("%s  %s", styleMuted.Render("Mock API:"), mockUpstream.URL),
+			fmt.Sprintf("%s  %s", styleMuted.Render("Mode:    "), modeLabel),
 			fmt.Sprintf("%s  %s", styleMuted.Render("Database:"), cfg.DBPath),
 			fmt.Sprintf("%s  %s", styleMuted.Render("Session: "), sessionID),
 		}
@@ -473,7 +500,12 @@ Follow best engineering practices and inspect files carefully before editing.`, 
 				"system":     sysBlocks,
 				"tools":      tools,
 				"messages": []map[string]any{
-					{"role": "user", "content": "Audit streaming latency and prompt cache efficiency in Trimbar."},
+					{
+						"role": "user",
+						"content": []map[string]any{
+							{"type": "text", "text": "Audit streaming latency and prompt cache efficiency in Trimbar.", "cache_control": map[string]string{"type": "ephemeral"}},
+						},
+					},
 					{
 						"role": "assistant",
 						"content": []map[string]any{
@@ -483,13 +515,13 @@ Follow best engineering practices and inspect files carefully before editing.`, 
 					{
 						"role": "user",
 						"content": []map[string]any{
-							{"type": "tool_result", "tool_use_id": "tu_bash_1", "content": ansiBashOutput, "cache_control": map[string]string{"type": "ephemeral"}},
+							{"type": "tool_result", "tool_use_id": "tu_bash_1", "content": ansiBashOutput},
 						},
 					},
 				},
 			},
 		},
-		// Turn 4: Main Agent warm cache hit (92%) + Duplicate Read calls (3x handler.go) + ANSI
+		// Turn 4: Main Agent warm cache hit (92%) + Duplicate Read calls (3x handler.go) + ANSI after cache_control
 		{
 			TurnNumber: 4,
 			Label:      "Main Agent (Sonnet 4) — warm cache hit (92%) + duplicate Read x3",
@@ -517,12 +549,14 @@ Follow best engineering practices and inspect files carefully before editing.`, 
 							{"type": "tool_use", "id": "tu_read_h1", "name": "Read", "input": map[string]string{"file_path": "internal/proxy/handler.go"}},
 						},
 					},
+					// Frozen cache prefix ends after the first Read of handler.go
 					{
 						"role": "user",
 						"content": []map[string]any{
-							{"type": "tool_result", "tool_use_id": "tu_read_h1", "content": handlerFileBody},
+							{"type": "tool_result", "tool_use_id": "tu_read_h1", "content": handlerFileBody, "cache_control": map[string]string{"type": "ephemeral"}},
 						},
 					},
+					// Post-cache turns: redundant Reads + ANSI Bash logs (safe to trim!)
 					{
 						"role": "assistant",
 						"content": []map[string]any{
@@ -546,7 +580,7 @@ Follow best engineering practices and inspect files carefully before editing.`, 
 					{
 						"role": "user",
 						"content": []map[string]any{
-							{"type": "tool_result", "tool_use_id": "tu_read_h3", "content": handlerFileBody, "cache_control": map[string]string{"type": "ephemeral"}},
+							{"type": "tool_result", "tool_use_id": "tu_read_h3", "content": handlerFileBody},
 						},
 					},
 				},
@@ -580,12 +614,14 @@ Follow best engineering practices and inspect files carefully before editing.`, 
 							{"type": "tool_use", "id": "tu_read_p1", "name": "Read", "input": map[string]string{"file_path": "internal/anthropic/sse_parser.go"}},
 						},
 					},
+					// Frozen prefix ends after first Read of sse_parser.go
 					{
 						"role": "user",
 						"content": []map[string]any{
-							{"type": "tool_result", "tool_use_id": "tu_read_p1", "content": parserFileBody},
+							{"type": "tool_result", "tool_use_id": "tu_read_p1", "content": parserFileBody, "cache_control": map[string]string{"type": "ephemeral"}},
 						},
 					},
+					// Post-cache duplicate Read of sse_parser.go (safe to trim!)
 					{
 						"role": "assistant",
 						"content": []map[string]any{
@@ -595,7 +631,7 @@ Follow best engineering practices and inspect files carefully before editing.`, 
 					{
 						"role": "user",
 						"content": []map[string]any{
-							{"type": "tool_result", "tool_use_id": "tu_read_p2", "content": parserFileBody, "cache_control": map[string]string{"type": "ephemeral"}},
+							{"type": "tool_result", "tool_use_id": "tu_read_p2", "content": parserFileBody},
 						},
 					},
 				},

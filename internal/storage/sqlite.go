@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS requests (
 	ansi_sequence_count INTEGER NOT NULL DEFAULT 0,
 	ansi_wasted_tokens INTEGER NOT NULL DEFAULT 0,
 	total_wasted_tokens INTEGER NOT NULL DEFAULT 0,
+
+	trimmed_tokens INTEGER NOT NULL DEFAULT 0,
+	trimmed_savings_usd REAL NOT NULL DEFAULT 0,
 
 	error_body TEXT NOT NULL DEFAULT ''
 );
@@ -180,8 +183,54 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema migration: %w", err)
 	}
+
+	// Safe backwards-compatible v2 column migrations for existing v1 SQLite databases.
+	if err := ensureColumn(ctx, tx, "requests", "trimmed_tokens", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "requests", "trimmed_savings_usd", "REAL NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations (version) VALUES (?);`, schemaVersion); err != nil {
 		return fmt.Errorf("record schema migration version: %w", err)
 	}
 	return tx.Commit()
+}
+
+func ensureColumn(ctx context.Context, tx *sql.Tx, table, column, colDef string) error {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s);", table))
+	if err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	exists := false
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			colType   string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if strings.EqualFold(name, column) {
+			exists = true
+		}
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	alterStmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", table, column, colDef)
+	if _, err := tx.ExecContext(ctx, alterStmt); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
+	return nil
 }

@@ -23,7 +23,7 @@ import (
 	"github.com/trimbar/trimbar/internal/storage"
 )
 
-var version = "0.1.0-mvp"
+var version = "0.2.0"
 
 // Lipgloss styles for terminal output.
 var (
@@ -82,11 +82,12 @@ func newRootCmd() *cobra.Command {
 
 func newStartCmd() *cobra.Command {
 	var (
-		host     string
-		port     int
-		upstream string
-		dbPath   string
-		mockMode bool
+		host        string
+		port        int
+		upstream    string
+		dbPath      string
+		mockMode    bool
+		trimEnabled bool
 	)
 
 	cmd := &cobra.Command{
@@ -108,6 +109,9 @@ func newStartCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("db") {
 				cfg.DBPath = dbPath
+			}
+			if cmd.Flags().Changed("trim") {
+				cfg.TrimEnabled = trimEnabled
 			}
 
 			if mockMode {
@@ -152,11 +156,16 @@ func newStartCmd() *cobra.Command {
 				upstreamLabel = cfg.UpstreamURL + " " + styleWarn.Render("(local mock API)")
 				usageHint = fmt.Sprintf("  trimbar demo --proxy %s", listenURL)
 			}
+			modeLabel := styleMuted.Render("Shadow Mode (read-only)")
+			if cfg.TrimEnabled {
+				modeLabel = styleOK.Render("Active Trimming (cache-safe)")
+			}
 			bannerLines := []string{
 				styleBrand.Render("TRIMBAR") + " " + styleMuted.Render("v"+version+" · Claude Code Local Gateway"),
 				"",
 				fmt.Sprintf("%s  %s", styleMuted.Render("Listen:  "), styleOK.Render(listenURL)),
 				fmt.Sprintf("%s  %s", styleMuted.Render("Upstream:"), upstreamLabel),
+				fmt.Sprintf("%s  %s", styleMuted.Render("Mode:    "), modeLabel),
 				fmt.Sprintf("%s  %s", styleMuted.Render("Database:"), cfg.DBPath),
 				"",
 				styleMuted.Render("Run Claude Code through Trimbar:"),
@@ -182,6 +191,7 @@ func newStartCmd() *cobra.Command {
 	cmd.Flags().StringVar(&upstream, "upstream", config.DefaultUpstreamURL, "Upstream Anthropic API URL")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Path to SQLite database (default ~/.trimbar/trimbar.db)")
 	cmd.Flags().BoolVar(&mockMode, "mock", false, "Use built-in local mock Anthropic SSE server (no API key needed)")
+	cmd.Flags().BoolVar(&trimEnabled, "trim", false, "Enable cache-safe active trimming of post-cache_control tool_results (default false: Shadow Mode)")
 	return cmd
 }
 
@@ -331,8 +341,13 @@ func buildRequestLog(ev proxy.ProxyEvent, resolver *gitmeta.Resolver, repo *stor
 		CacheSavingsUSD:    ev.Cost.CacheSavingsUSD,
 		NetCacheSavingsUSD: ev.Cost.NetCacheSavingsUSD,
 		ShadowSavingsUSD:   ev.ShadowSavings.HonestSavingsUSD,
+		TrimmedSavingsUSD:  ev.TrimmedSavingsUSD,
 		ErrorBody:          ev.ErrorBody,
 		AgentRole:          anthropic.AgentRoleMain,
+	}
+
+	if ev.TrimResult != nil {
+		rec.TrimmedTokens = ev.TrimResult.TrimmedTokens
 	}
 
 	if ev.Inspection != nil {
@@ -424,6 +439,9 @@ func printLiveEvent(rec *storage.RequestLog) {
 	}
 
 	var flags []string
+	if rec.TrimmedTokens > 0 {
+		flags = append(flags, styleOK.Render(fmt.Sprintf("TRIM:-%s", formatTokens(int64(rec.TrimmedTokens)))))
+	}
 	if rec.CacheMissAnomaly {
 		flags = append(flags, styleErr.Render("CACHE-MISS"))
 	}
@@ -478,10 +496,14 @@ func renderStats(s *storage.StatsSummary, window string) {
 		styleTitle.Render(fmt.Sprintf("%.1f%%", s.CacheHitRatio*100)),
 		renderProgressBar(s.CacheHitRatio, 18),
 	))
+	card4Footer := styleMuted.Render(fmt.Sprintf("shadow waste ~$%.4f", s.TotalShadowSavingsUSD))
+	if s.TotalTrimmedTokens > 0 {
+		card4Footer = styleOK.Render(fmt.Sprintf("trimmed -%s ($%.4f)", formatTokens(s.TotalTrimmedTokens), s.TotalTrimmedSavingsUSD))
+	}
 	card4 := styleCard.Render(fmt.Sprintf("%s\n%s\n%s",
 		styleMuted.Render("NET CACHE SAVINGS"),
 		styleOK.Render(fmt.Sprintf("$%.4f", s.TotalNetCacheSavingsUSD)),
-		styleMuted.Render(fmt.Sprintf("shadow waste ~$%.4f", s.TotalShadowSavingsUSD)),
+		card4Footer,
 	))
 
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, card1, card2, card3, card4))
@@ -536,11 +558,15 @@ func renderStats(s *storage.StatsSummary, window string) {
 
 	// Context hygiene & anomalies summary
 	fmt.Println(styleTitle.Render("CONTEXT HEALTH & ANOMALIES"))
-	fmt.Printf("  Cache Miss Anomalies:   %s\n", formatAlertCount(s.CacheMissAnomalies))
-	fmt.Printf("  Duplicate Read Calls:   %d (%s est. wasted tokens)\n",
+	fmt.Printf("  Cache Miss Anomalies:            %s\n", formatAlertCount(s.CacheMissAnomalies))
+	fmt.Printf("  Duplicate Read Calls:            %d (%s est. wasted tokens)\n",
 		s.DuplicateReadCalls, formatTokens(s.DuplicateReadWastedTokens))
-	fmt.Printf("  ANSI Escape Overhead:   %s est. wasted tokens\n", formatTokens(s.ANSIWastedTokens))
-	fmt.Printf("  Honest Shadow Savings:  %s\n", styleWarn.Render(fmt.Sprintf("$%.4f", s.TotalShadowSavingsUSD)))
+	fmt.Printf("  ANSI Escape Overhead:            %s est. wasted tokens\n", formatTokens(s.ANSIWastedTokens))
+	fmt.Printf("  Honest Shadow Savings:           %s\n", styleWarn.Render(fmt.Sprintf("$%.4f", s.TotalShadowSavingsUSD)))
+	fmt.Printf("  Actual Trimmed Tokens & Savings: %s (%s)\n",
+		styleOK.Render(formatTokens(s.TotalTrimmedTokens)+" tokens"),
+		styleOK.Render(fmt.Sprintf("$%.4f USD saved", s.TotalTrimmedSavingsUSD)),
+	)
 }
 
 func renderInspect(rep *storage.InspectReport) {
@@ -594,6 +620,9 @@ func renderInspect(rep *storage.InspectReport) {
 		if t.StatusCode >= 400 {
 			flags = append(flags, styleErr.Render(fmt.Sprintf("HTTP-%d", t.StatusCode)))
 		}
+		if t.TrimmedTokens > 0 {
+			flags = append(flags, styleOK.Render(fmt.Sprintf("TRIM:-%s", formatTokens(int64(t.TrimmedTokens)))))
+		}
 		if t.CacheMissAnomaly {
 			flags = append(flags, styleErr.Render("CACHE-MISS"))
 		}
@@ -636,7 +665,14 @@ func renderInspect(rep *storage.InspectReport) {
 		fmt.Println()
 	}
 
-	// 4. ANSI Overhead
+	// 4. Active Trimming & ANSI Overhead
+	if rep.TotalTrimmedTokens > 0 {
+		fmt.Println(styleTitle.Render("ACTIVE TRIMMING (CACHE-SAFE)"))
+		fmt.Printf("  %s tokens trimmed after cache_control boundary (%s actual USD saved)\n\n",
+			styleOK.Render(formatTokens(rep.TotalTrimmedTokens)),
+			styleOK.Render(fmt.Sprintf("$%.4f", rep.TotalTrimmedSavingsUSD)),
+		)
+	}
 	if rep.TotalANSISequences > 0 {
 		fmt.Println(styleTitle.Render("ANSI ESCAPE POLLUTION"))
 		fmt.Printf("  %d escape sequences across inspected tool_results (~%s wasted tokens)\n\n",

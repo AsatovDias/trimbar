@@ -166,3 +166,19 @@ func (c *Calculator) CalculateShadowSavings(model string, usage Usage, wastedTok
 		CacheReadSavingsUSD:   float64(wastedTokens) * p.CacheReadPerMTok / tokensPerMillion,
 	}
 }
+
+// CalculateTrimmedSavings computes the conservative USD saved by actively removing
+// trimmedTokens from post-cache_control tool results before sending to Anthropic.
+// Because post-cache tokens are never served from an existing cache entry on the turn
+// they are sent (they would otherwise be billed at 1.0x input or 1.25x cache write),
+// pricing them at the base InputPerMTok rate gives a conservative actual USD savings floor.
+func (c *Calculator) CalculateTrimmedSavings(model string, trimmedTokens int64) float64 {
+	if trimmedTokens <= 0 {
+		return 0
+	}
+	p, ok := c.cfg.LookupPricing(model)
+	if !ok {
+		return 0
+	}
+	return float64(trimmedTokens) * p.InputPerMTok / tokensPerMillion
+}

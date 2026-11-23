@@ -59,6 +59,9 @@ type RequestLog struct {
 	ANSIWastedTokens  int
 	TotalWastedTokens int
 
+	TrimmedTokens     int
+	TrimmedSavingsUSD float64
+
 	ErrorBody string
 }
 
@@ -130,6 +133,8 @@ type StatsSummary struct {
 	DuplicateReadWastedTokens int64             `json:"duplicate_read_wasted_tokens"`
 	ANSIWastedTokens          int64             `json:"ansi_wasted_tokens"`
 	TotalWastedTokens         int64             `json:"total_wasted_tokens"`
+	TotalTrimmedTokens        int64             `json:"total_trimmed_tokens"`
+	TotalTrimmedSavingsUSD    float64           `json:"total_trimmed_savings_usd"`
 	ByModel                   []ModelStats      `json:"by_model"`
 	ByRepoBranch              []RepoBranchStats `json:"by_repo_branch"`
 }
@@ -157,8 +162,10 @@ type InspectReport struct {
 	Context            ContextComposition     `json:"context"`
 	DuplicateHotspots  []DuplicateReadHotspot `json:"duplicate_hotspots"`
 	CacheMissAnomalies []RequestLog           `json:"cache_miss_anomalies"`
-	TotalANSISequences int64                  `json:"total_ansi_sequences"`
-	TotalANSIWasted    int64                  `json:"total_ansi_wasted_tokens"`
+	TotalANSISequences      int64                  `json:"total_ansi_sequences"`
+	TotalANSIWasted         int64                  `json:"total_ansi_wasted_tokens"`
+	TotalTrimmedTokens      int64                  `json:"total_trimmed_tokens"`
+	TotalTrimmedSavingsUSD  float64                `json:"total_trimmed_savings_usd"`
 }
 
 // Repository provides persistence and analytical queries over the SQLite requests table.
@@ -204,6 +211,7 @@ INSERT INTO requests (
 	system_est_tokens, tools_est_tokens, messages_est_tokens, tool_results_est_tokens,
 	duplicate_read_count, duplicate_read_wasted_tokens, duplicate_reads_json,
 	ansi_sequence_count, ansi_wasted_tokens, total_wasted_tokens,
+	trimmed_tokens, trimmed_savings_usd,
 	error_body
 ) VALUES (
 	?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -215,6 +223,7 @@ INSERT INTO requests (
 	?, ?, ?, ?,
 	?, ?, ?,
 	?, ?, ?,
+	?, ?,
 	?
 );`
 
@@ -254,6 +263,8 @@ INSERT INTO requests (
 		rec.ANSISequenceCount,
 		rec.ANSIWastedTokens,
 		rec.TotalWastedTokens,
+		rec.TrimmedTokens,
+		rec.TrimmedSavingsUSD,
 		rec.ErrorBody,
 	)
 	if err != nil {
@@ -323,7 +334,9 @@ SELECT
 	COALESCE(SUM(duplicate_read_count), 0),
 	COALESCE(SUM(duplicate_read_wasted_tokens), 0),
 	COALESCE(SUM(ansi_wasted_tokens), 0),
-	COALESCE(SUM(total_wasted_tokens), 0)
+	COALESCE(SUM(total_wasted_tokens), 0),
+	COALESCE(SUM(trimmed_tokens), 0),
+	COALESCE(SUM(trimmed_savings_usd), 0)
 FROM requests %s;`, where)
 
 	if err := r.db.sqlDB.QueryRowContext(ctx, aggQ, args...).Scan(
@@ -345,6 +358,8 @@ FROM requests %s;`, where)
 		&summary.DuplicateReadWastedTokens,
 		&summary.ANSIWastedTokens,
 		&summary.TotalWastedTokens,
+		&summary.TotalTrimmedTokens,
+		&summary.TotalTrimmedSavingsUSD,
 	); err != nil {
 		return nil, fmt.Errorf("query stats aggregate: %w", err)
 	}
@@ -469,6 +484,7 @@ SELECT
 	system_est_tokens, tools_est_tokens, messages_est_tokens, tool_results_est_tokens,
 	duplicate_read_count, duplicate_read_wasted_tokens, duplicate_reads_json,
 	ansi_sequence_count, ansi_wasted_tokens, total_wasted_tokens,
+	trimmed_tokens, trimmed_savings_usd,
 	error_body
 FROM requests %s
 ORDER BY id DESC
@@ -502,6 +518,7 @@ LIMIT ?;`, where)
 			&rec.SystemEstTokens, &rec.ToolsEstTokens, &rec.MessagesEstTokens, &rec.ToolResultsEstTokens,
 			&rec.DuplicateReadCount, &rec.DuplicateReadWastedTokens, &dupJSON,
 			&rec.ANSISequenceCount, &rec.ANSIWastedTokens, &rec.TotalWastedTokens,
+			&rec.TrimmedTokens, &rec.TrimmedSavingsUSD,
 			&rec.ErrorBody,
 		); err != nil {
 			return nil, err
@@ -523,6 +540,8 @@ LIMIT ?;`, where)
 
 		report.TotalANSISequences += int64(rec.ANSISequenceCount)
 		report.TotalANSIWasted += int64(rec.ANSIWastedTokens)
+		report.TotalTrimmedTokens += int64(rec.TrimmedTokens)
+		report.TotalTrimmedSavingsUSD += rec.TrimmedSavingsUSD
 
 		// Context composition (aggregate across inspected turns)
 		report.Context.SystemTokens += int64(rec.SystemEstTokens)

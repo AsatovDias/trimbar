@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -168,5 +169,95 @@ func TestRepositoryInsertStatsInspectAndSessionUsage(t *testing.T) {
 	}
 	if inspect.TotalANSISequences != 6 || inspect.TotalANSIWasted != 50 {
 		t.Errorf("ANSI totals = (%d, %d), want (6, 50)", inspect.TotalANSISequences, inspect.TotalANSIWasted)
+	}
+}
+
+func TestV1DatabaseMigratesSafelyToV2TrimmedColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy_v1.db")
+
+	// Simulate an older v0.1.0 SQLite database without trimmed_tokens / trimmed_savings_usd columns.
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy sqlite: %v", err)
+	}
+	legacySchema := `
+CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT '');
+INSERT INTO schema_migrations (version) VALUES (1);
+CREATE TABLE requests (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	timestamp TEXT NOT NULL,
+	session_id TEXT NOT NULL DEFAULT '',
+	request_id TEXT NOT NULL DEFAULT '',
+	method TEXT NOT NULL,
+	path TEXT NOT NULL,
+	status_code INTEGER NOT NULL,
+	model TEXT NOT NULL DEFAULT '',
+	agent_role TEXT NOT NULL DEFAULT 'main',
+	is_streaming INTEGER NOT NULL DEFAULT 0,
+	git_repo TEXT NOT NULL DEFAULT '',
+	git_branch TEXT NOT NULL DEFAULT '',
+	cwd TEXT NOT NULL DEFAULT '',
+	input_tokens INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+	cost_usd REAL NOT NULL DEFAULT 0,
+	cache_savings_usd REAL NOT NULL DEFAULT 0,
+	net_cache_savings_usd REAL NOT NULL DEFAULT 0,
+	shadow_savings_usd REAL NOT NULL DEFAULT 0,
+	latency_ms INTEGER NOT NULL DEFAULT 0,
+	ttfb_ms INTEGER NOT NULL DEFAULT 0,
+	cache_breakpoints INTEGER NOT NULL DEFAULT 0,
+	cache_miss_anomaly INTEGER NOT NULL DEFAULT 0,
+	cache_miss_reason TEXT NOT NULL DEFAULT '',
+	system_est_tokens INTEGER NOT NULL DEFAULT 0,
+	tools_est_tokens INTEGER NOT NULL DEFAULT 0,
+	messages_est_tokens INTEGER NOT NULL DEFAULT 0,
+	tool_results_est_tokens INTEGER NOT NULL DEFAULT 0,
+	duplicate_read_count INTEGER NOT NULL DEFAULT 0,
+	duplicate_read_wasted_tokens INTEGER NOT NULL DEFAULT 0,
+	duplicate_reads_json TEXT NOT NULL DEFAULT '[]',
+	ansi_sequence_count INTEGER NOT NULL DEFAULT 0,
+	ansi_wasted_tokens INTEGER NOT NULL DEFAULT 0,
+	total_wasted_tokens INTEGER NOT NULL DEFAULT 0,
+	error_body TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO requests (timestamp, method, path, status_code, model) VALUES ('2026-01-01T00:00:00Z', 'POST', '/v1/messages', 200, 'claude-sonnet-4-20250514');
+`
+	if _, err := rawDB.Exec(legacySchema); err != nil {
+		t.Fatalf("create legacy v1 schema: %v", err)
+	}
+	_ = rawDB.Close()
+
+	// Opening via storage.Open must safely ALTER TABLE and preserve existing rows.
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() on legacy v1 DB failed: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	ctx := context.Background()
+	if _, err := repo.InsertRequest(ctx, &RequestLog{
+		Timestamp:         time.Now().UTC(),
+		Method:            "POST",
+		Path:              "/v1/messages",
+		StatusCode:        200,
+		Model:             "claude-sonnet-4-20250514",
+		TrimmedTokens:     750,
+		TrimmedSavingsUSD: 0.00225,
+	}); err != nil {
+		t.Fatalf("InsertRequest after v2 migration failed: %v", err)
+	}
+
+	stats, err := repo.GetStats(ctx, StatsFilter{})
+	if err != nil {
+		t.Fatalf("GetStats after v2 migration failed: %v", err)
+	}
+	if stats.TotalRequests != 2 {
+		t.Errorf("TotalRequests = %d, want 2 (1 legacy + 1 new)", stats.TotalRequests)
+	}
+	if stats.TotalTrimmedTokens != 750 || stats.TotalTrimmedSavingsUSD <= 0 {
+		t.Errorf("trimmed totals = (%d, %v), want (750, >0)", stats.TotalTrimmedTokens, stats.TotalTrimmedSavingsUSD)
 	}
 }

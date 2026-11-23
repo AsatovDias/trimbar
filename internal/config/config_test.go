@@ -52,6 +52,7 @@ func TestLoadFromTOMLAndEnv(t *testing.T) {
 host = "127.0.0.1"
 port = 9091
 upstream_url = "https://example.anthropic.test/"
+trim_enabled = true
 `
 	if err := os.WriteFile(filepath.Join(dir, DefaultConfigFile), []byte(tomlContent), 0o600); err != nil {
 		t.Fatalf("write config.toml: %v", err)
@@ -61,10 +62,14 @@ upstream_url = "https://example.anthropic.test/"
 	t.Setenv("TRIMBAR_PORT", "9099")
 	t.Setenv("TRIMBAR_UPSTREAM_URL", "")
 	t.Setenv("TRIMBAR_HOST", "")
+	t.Setenv("TRIMBAR_TRIM_ENABLED", "")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.TrimEnabled {
+		t.Errorf("TrimEnabled = false, want true from config.toml")
 	}
 	if cfg.Port != 9099 {
 		t.Errorf("Port = %d, want 9099 (env override)", cfg.Port)

@@ -14,6 +14,7 @@ import (
 	"github.com/trimbar/trimbar/internal/anthropic"
 	"github.com/trimbar/trimbar/internal/config"
 	"github.com/trimbar/trimbar/internal/pricing"
+	"github.com/trimbar/trimbar/internal/trimmer"
 )
 
 const (
@@ -30,24 +31,34 @@ type ProxyEvent struct {
 	TTFB          time.Duration
 	IsStreaming   bool
 	ResponseBytes int64
-	Inspection    *anthropic.InspectionResult
-	StreamResult  *anthropic.StreamResult
-	Cost          pricing.CostBreakdown
-	ShadowSavings pricing.ShadowSavings
-	ErrorBody     string
-	UpstreamErr   error
+	Inspection        *anthropic.InspectionResult
+	StreamResult      *anthropic.StreamResult
+	TrimResult        *trimmer.TrimResult
+	Cost              pricing.CostBreakdown
+	ShadowSavings     pricing.ShadowSavings
+	TrimmedSavingsUSD float64
+	ErrorBody         string
+	UpstreamErr       error
 }
 
 // Handler is the transparent Anthropic reverse-proxy http.Handler.
 type Handler struct {
-	upstream   *url.URL
-	client     *http.Client
-	calculator *pricing.Calculator
-	onComplete func(ProxyEvent)
+	upstream    *url.URL
+	client      *http.Client
+	calculator  *pricing.Calculator
+	trimEnabled bool
+	onComplete  func(ProxyEvent)
 }
 
 // HandlerOption configures optional Handler behavior.
 type HandlerOption func(*Handler)
+
+// WithTrimEnabled enables or disables cache-safe active request trimming.
+func WithTrimEnabled(enabled bool) HandlerOption {
+	return func(h *Handler) {
+		h.trimEnabled = enabled
+	}
+}
 
 // WithHTTPClient overrides the HTTP client used to call the upstream API.
 func WithHTTPClient(client *http.Client) HandlerOption {
@@ -88,9 +99,10 @@ func NewHandler(cfg *config.Config, opts ...HandlerOption) (*Handler, error) {
 	}
 
 	h := &Handler{
-		upstream:   u,
-		client:     defaultHTTPClient(),
-		calculator: pricing.NewCalculator(cfg),
+		upstream:    u,
+		client:      defaultHTTPClient(),
+		calculator:  pricing.NewCalculator(cfg),
+		trimEnabled: cfg.TrimEnabled,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -129,10 +141,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = r.Body.Close()
 
-		outBody = bytes.NewReader(bodyBytes)
-		contentLength = int64(len(bodyBytes))
+		outboundBytes := bodyBytes
+		if h.trimEnabled {
+			if tr, err := trimmer.TrimRequest(bodyBytes); err == nil {
+				trCopy := tr
+				event.TrimResult = &trCopy
+				if tr.Modified {
+					outboundBytes = tr.Body
+				}
+			}
+		}
 
-		// Inspect the cloned request payload concurrently so it adds 0ms to upstream TTFB.
+		outBody = bytes.NewReader(outboundBytes)
+		contentLength = int64(len(outboundBytes))
+
+		// Inspect the original cloned request payload concurrently so it adds 0ms to upstream TTFB.
 		inspectDone = make(chan struct{})
 		go func() {
 			defer close(inspectDone)
@@ -158,6 +181,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	copyHeaders(outReq.Header, r.Header)
+	// Let net/http emit the exact Content-Length matching outReq.ContentLength (critical when active trimming shrinks the body).
+	if isMessages {
+		outReq.Header.Del("Content-Length")
+	}
 	outReq.Host = h.upstream.Host
 	outReq.ContentLength = contentLength
 
@@ -242,20 +269,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		event.Inspection = inspectRes
 	}
 
-	// Enrich telemetry with exact USD cost and honest shadow-savings calculation.
-	if event.StreamResult != nil && h.calculator != nil {
-		model := event.StreamResult.Model
-		if model == "" && event.Inspection != nil {
+	// Enrich telemetry with exact USD cost, honest shadow savings, and active trim savings.
+	if h.calculator != nil {
+		var model string
+		if event.StreamResult != nil && event.StreamResult.Model != "" {
+			model = event.StreamResult.Model
+		} else if event.Inspection != nil {
 			model = event.Inspection.Model
 		}
-		u := pricingUsageFromAnthropic(event.StreamResult.Usage)
-		event.Cost = h.calculator.CalculateCost(model, u)
-		if event.Inspection != nil && event.Inspection.TotalWastedEstTokens > 0 {
-			event.ShadowSavings = h.calculator.CalculateShadowSavings(
-				model,
-				u,
-				int64(event.Inspection.TotalWastedEstTokens),
-			)
+
+		if event.StreamResult != nil {
+			u := pricingUsageFromAnthropic(event.StreamResult.Usage)
+			event.Cost = h.calculator.CalculateCost(model, u)
+			if event.Inspection != nil && event.Inspection.TotalWastedEstTokens > 0 {
+				event.ShadowSavings = h.calculator.CalculateShadowSavings(
+					model,
+					u,
+					int64(event.Inspection.TotalWastedEstTokens),
+				)
+			}
+		}
+		if event.TrimResult != nil && event.TrimResult.TrimmedTokens > 0 {
+			event.TrimmedSavingsUSD = h.calculator.CalculateTrimmedSavings(model, int64(event.TrimResult.TrimmedTokens))
 		}
 	}
 

@@ -35,6 +35,7 @@ type Config struct {
 	UpstreamURL string
 	DataDir     string
 	DBPath      string
+	TrimEnabled bool
 	Pricing     map[string]ModelPricing
 }
 
@@ -183,6 +184,13 @@ func Load() (*Config, error) {
 	if upstream := strings.TrimSpace(os.Getenv("TRIMBAR_UPSTREAM_URL")); upstream != "" {
 		cfg.UpstreamURL = strings.TrimRight(upstream, "/")
 	}
+	if trimEnv := strings.TrimSpace(os.Getenv("TRIMBAR_TRIM_ENABLED")); trimEnv != "" {
+		b, err := strconv.ParseBool(trimEnv)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TRIMBAR_TRIM_ENABLED %q", trimEnv)
+		}
+		cfg.TrimEnabled = b
+	}
 
 	return cfg, nil
 }
@@ -298,6 +306,12 @@ func (c *Config) loadTOMLFile(path string) error {
 			if val != "" {
 				c.DBPath = val
 			}
+		case "trim_enabled":
+			b, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("%s:%d: invalid trim_enabled %q", path, lineNum, val)
+			}
+			c.TrimEnabled = b
 		}
 	}
 	return scanner.Err()

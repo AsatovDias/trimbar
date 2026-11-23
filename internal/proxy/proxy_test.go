@@ -470,3 +470,96 @@ func TestNonStreamingMessagesResponse(t *testing.T) {
 		t.Fatalf("timed out waiting for non-streaming telemetry")
 	}
 }
+
+func TestActiveTrimmingUpdatesOutboundBodyAndContentLength(t *testing.T) {
+	fileBody := strings.Repeat("package main // repeated file body\n", 40)
+	reqPayload := map[string]any{
+		"model":      "claude-sonnet-4-20250514",
+		"max_tokens": 2048,
+		"stream":     false,
+		"messages": []map[string]any{
+			{"role": "user", "content": "check main.go"},
+			{
+				"role": "assistant",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "tu_r1", "name": "Read", "input": map[string]string{"file_path": "main.go"}},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_r1", "content": fileBody, "cache_control": map[string]string{"type": "ephemeral"}},
+				},
+			},
+			{
+				"role": "assistant",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "tu_r2", "name": "Read", "input": map[string]string{"file_path": "main.go"}},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_r2", "content": fileBody},
+				},
+			},
+		},
+	}
+	origBytes, _ := json.Marshal(reqPayload)
+
+	var (
+		gotUpstreamBody []byte
+		gotContentLen   int64
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentLen = r.ContentLength
+		gotUpstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"msg_trim_1","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":100,"cache_read_input_tokens":500,"output_tokens":20}}`)
+	}))
+	defer upstream.Close()
+
+	eventCh := make(chan ProxyEvent, 1)
+	cfg := config.Default()
+	cfg.UpstreamURL = upstream.URL
+	cfg.TrimEnabled = true
+
+	srv, err := NewServer(cfg, WithOnComplete(func(ev ProxyEvent) {
+		eventCh <- ev
+	}))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	proxySrv := httptest.NewServer(srv.ServeMux())
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/messages", "application/json", bytes.NewReader(origBytes))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if len(gotUpstreamBody) >= len(origBytes) {
+		t.Errorf("expected trimmed upstream body (%d bytes) < original (%d bytes)", len(gotUpstreamBody), len(origBytes))
+	}
+	if gotContentLen != int64(len(gotUpstreamBody)) {
+		t.Errorf("upstream Content-Length = %d, want %d", gotContentLen, len(gotUpstreamBody))
+	}
+	if !strings.Contains(string(gotUpstreamBody), "[Trimbar: identical content of main.go already loaded earlier in context]") {
+		t.Errorf("expected duplicate Read placeholder in trimmed upstream payload")
+	}
+
+	select {
+	case ev := <-eventCh:
+		if ev.TrimResult == nil || !ev.TrimResult.Modified || ev.TrimResult.TrimmedTokens <= 0 {
+			t.Errorf("expected populated TrimResult, got %+v", ev.TrimResult)
+		}
+		if ev.TrimmedSavingsUSD <= 0 {
+			t.Errorf("expected TrimmedSavingsUSD > 0, got %v", ev.TrimmedSavingsUSD)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for telemetry event")
+	}
+}

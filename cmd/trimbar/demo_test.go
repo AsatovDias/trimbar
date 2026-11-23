@@ -73,4 +73,37 @@ func TestRunDemoEndToEnd(t *testing.T) {
 	if len(inspect.CacheMissAnomalies) != 1 {
 		t.Errorf("len(CacheMissAnomalies) = %d, want 1", len(inspect.CacheMissAnomalies))
 	}
+	if stats.TotalTrimmedTokens != 0 {
+		t.Errorf("Shadow Mode TotalTrimmedTokens = %d, want 0", stats.TotalTrimmedTokens)
+	}
+}
+
+func TestRunDemoActiveTrimmingMode(t *testing.T) {
+	repoDir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.DBPath = filepath.Join(cfg.DataDir, "demo_trim.db")
+	cfg.TrimEnabled = true
+
+	if err := runDemo(context.Background(), cfg, "", repoDir); err != nil {
+		t.Fatalf("runDemo(--trim) error = %v", err)
+	}
+
+	db, err := storage.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	defer db.Close()
+
+	repo := storage.NewRepository(db)
+	stats, err := repo.GetStats(context.Background(), storage.StatsFilter{})
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.TotalTrimmedTokens <= 2000 {
+		t.Errorf("Active Trimming TotalTrimmedTokens = %d, want > 2000", stats.TotalTrimmedTokens)
+	}
+	if stats.TotalTrimmedSavingsUSD <= 0 {
+		t.Errorf("Active Trimming TotalTrimmedSavingsUSD = %v, want > 0", stats.TotalTrimmedSavingsUSD)
+	}
 }
