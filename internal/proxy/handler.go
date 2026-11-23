@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,37 +22,69 @@ const (
 	maxErrorCaptureBytes = 4096
 )
 
+// RetryEvent describes a retry or failover triggered before SSE streaming starts.
+type RetryEvent struct {
+	Attempt    int
+	StatusCode int
+	Delay      time.Duration
+	Failover   bool
+	TargetURL  string
+}
+
 // ProxyEvent carries structured telemetry emitted after each proxied HTTP request completes.
 type ProxyEvent struct {
-	Timestamp     time.Time
-	Method        string
-	Path          string
-	StatusCode    int
-	Latency       time.Duration
-	TTFB          time.Duration
-	IsStreaming   bool
-	ResponseBytes int64
+	Timestamp         time.Time
+	Method            string
+	Path              string
+	StatusCode        int
+	Latency           time.Duration
+	TTFB              time.Duration
+	IsStreaming       bool
+	ResponseBytes     int64
 	Inspection        *anthropic.InspectionResult
 	StreamResult      *anthropic.StreamResult
 	TrimResult        *trimmer.TrimResult
 	Cost              pricing.CostBreakdown
 	ShadowSavings     pricing.ShadowSavings
 	TrimmedSavingsUSD float64
+	RetryCount        int
+	FailoverUsed      bool
 	ErrorBody         string
 	UpstreamErr       error
 }
 
 // Handler is the transparent Anthropic reverse-proxy http.Handler.
 type Handler struct {
-	upstream    *url.URL
-	client      *http.Client
-	calculator  *pricing.Calculator
-	trimEnabled bool
-	onComplete  func(ProxyEvent)
+	upstream         *url.URL
+	fallbackUpstream *url.URL
+	fallbackAPIKey   string
+	maxRetries       int
+	retryBaseDelay   time.Duration
+	maxRetryAfter    time.Duration
+	client           *http.Client
+	calculator       *pricing.Calculator
+	trimEnabled      bool
+	onComplete       func(ProxyEvent)
+	onRetry          func(RetryEvent)
+	uiHandler        http.Handler
 }
 
 // HandlerOption configures optional Handler behavior.
 type HandlerOption func(*Handler)
+
+// WithOnRetry registers a callback invoked whenever a 429/529 retry or failover fires.
+func WithOnRetry(fn func(RetryEvent)) HandlerOption {
+	return func(h *Handler) {
+		h.onRetry = fn
+	}
+}
+
+// WithWebUI attaches the local offline Web UI handler (/ui, /api/stats, /api/inspect) to Server.
+func WithWebUI(ui http.Handler) HandlerOption {
+	return func(h *Handler) {
+		h.uiHandler = ui
+	}
+}
 
 // WithTrimEnabled enables or disables cache-safe active request trimming.
 func WithTrimEnabled(enabled bool) HandlerOption {
@@ -98,11 +131,37 @@ func NewHandler(cfg *config.Config, opts ...HandlerOption) (*Handler, error) {
 		return nil, fmt.Errorf("upstream URL %q must include scheme and host", cfg.UpstreamURL)
 	}
 
+	var fbURL *url.URL
+	if strings.TrimSpace(cfg.FallbackUpstream) != "" {
+		parsedFB, err := url.Parse(cfg.FallbackUpstream)
+		if err != nil {
+			return nil, fmt.Errorf("parse fallback upstream URL %q: %w", cfg.FallbackUpstream, err)
+		}
+		if parsedFB.Scheme == "" || parsedFB.Host == "" {
+			return nil, fmt.Errorf("fallback upstream URL %q must include scheme and host", cfg.FallbackUpstream)
+		}
+		fbURL = parsedFB
+	}
+
+	retryBase := cfg.RetryBaseDelay
+	if retryBase <= 0 {
+		retryBase = config.DefaultRetryBaseDelay
+	}
+	maxRetryAfter := cfg.MaxRetryAfter
+	if maxRetryAfter <= 0 {
+		maxRetryAfter = config.DefaultMaxRetryAfter
+	}
+
 	h := &Handler{
-		upstream:    u,
-		client:      defaultHTTPClient(),
-		calculator:  pricing.NewCalculator(cfg),
-		trimEnabled: cfg.TrimEnabled,
+		upstream:         u,
+		fallbackUpstream: fbURL,
+		fallbackAPIKey:   cfg.FallbackAPIKey,
+		maxRetries:       cfg.MaxRetries,
+		retryBaseDelay:   retryBase,
+		maxRetryAfter:    maxRetryAfter,
+		client:           defaultHTTPClient(),
+		calculator:       pricing.NewCalculator(cfg),
+		trimEnabled:      cfg.TrimEnabled,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -123,8 +182,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Path:      r.URL.Path,
 	}
 
-	var outBody io.Reader = r.Body
-	var contentLength = r.ContentLength
+	var (
+		outboundBytes []byte
+		replayable    bool
+		outBody       io.Reader = r.Body
+		contentLength           = r.ContentLength
+	)
 
 	var inspectDone chan struct{}
 	var inspectRes *anthropic.InspectionResult
@@ -141,7 +204,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = r.Body.Close()
 
-		outboundBytes := bodyBytes
+		outboundBytes = bodyBytes
 		if h.trimEnabled {
 			if tr, err := trimmer.TrimRequest(bodyBytes); err == nil {
 				trCopy := tr
@@ -152,6 +215,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		replayable = true
 		outBody = bytes.NewReader(outboundBytes)
 		contentLength = int64(len(outboundBytes))
 
@@ -163,32 +227,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				inspectRes = res
 			}
 		}()
+	} else if r.Body == nil || r.ContentLength == 0 {
+		replayable = true
 	}
 
-	targetURL := buildUpstreamURL(h.upstream, r.URL)
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), outBody)
-	if err != nil {
-		writeProxyError(w, http.StatusBadGateway, "proxy_error", "failed to build upstream request")
-		event.StatusCode = http.StatusBadGateway
-		event.Latency = time.Since(start)
-		event.UpstreamErr = err
-		if inspectDone != nil {
-			<-inspectDone
-			event.Inspection = inspectRes
-		}
-		h.emit(event)
-		return
-	}
-
-	copyHeaders(outReq.Header, r.Header)
-	// Let net/http emit the exact Content-Length matching outReq.ContentLength (critical when active trimming shrinks the body).
-	if isMessages {
-		outReq.Header.Del("Content-Length")
-	}
-	outReq.Host = h.upstream.Host
-	outReq.ContentLength = contentLength
-
-	resp, err := h.client.Do(outReq)
+	resp, retryCount, failoverUsed, err := h.doUpstreamWithRetry(r, isMessages, replayable, outboundBytes, outBody, contentLength)
+	event.RetryCount = retryCount
+	event.FailoverUsed = failoverUsed
 	if err != nil {
 		writeProxyError(w, http.StatusBadGateway, "upstream_unreachable", fmt.Sprintf("upstream request failed: %v", err))
 		event.StatusCode = http.StatusBadGateway
@@ -302,6 +347,179 @@ func (h *Handler) emit(ev ProxyEvent) {
 	if h.onComplete != nil {
 		h.onComplete(ev)
 	}
+}
+
+func (h *Handler) hasFallback() bool {
+	return h.fallbackUpstream != nil || strings.TrimSpace(h.fallbackAPIKey) != ""
+}
+
+// doUpstreamWithRetry executes the upstream request and safely retries up to maxRetries
+// times (before SSE streaming begins) on HTTP 429 or 529, respecting Retry-After or
+// exponential backoff (1s -> 2s), or failing over to fallback_upstream / fallback_api_key.
+func (h *Handler) doUpstreamWithRetry(
+	r *http.Request,
+	isMessages bool,
+	replayable bool,
+	outboundBytes []byte,
+	initialBody io.Reader,
+	contentLength int64,
+) (*http.Response, int, bool, error) {
+	maxAttempts := 1
+	if replayable && h.maxRetries > 0 {
+		maxAttempts += h.maxRetries
+	}
+
+	var (
+		retryCount   int
+		failoverUsed bool
+		useFallback  bool
+	)
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		base := h.upstream
+		if useFallback && h.fallbackUpstream != nil {
+			base = h.fallbackUpstream
+		}
+
+		var bodyReader io.Reader
+		if attempt == 0 && !replayable {
+			bodyReader = initialBody
+		} else if len(outboundBytes) > 0 {
+			bodyReader = bytes.NewReader(outboundBytes)
+		}
+
+		targetURL := buildUpstreamURL(base, r.URL)
+		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bodyReader)
+		if err != nil {
+			return nil, retryCount, failoverUsed, err
+		}
+
+		copyHeaders(outReq.Header, r.Header)
+		if isMessages {
+			outReq.Header.Del("Content-Length")
+		}
+		if useFallback && strings.TrimSpace(h.fallbackAPIKey) != "" {
+			outReq.Header.Set("x-api-key", h.fallbackAPIKey)
+		}
+		outReq.Host = base.Host
+		outReq.ContentLength = contentLength
+
+		resp, err := h.client.Do(outReq)
+		if err != nil {
+			// On transport error, fail over immediately if fallback is configured and not yet attempted.
+			if replayable && h.hasFallback() && !useFallback && attempt+1 < maxAttempts {
+				useFallback = true
+				failoverUsed = true
+				retryCount++
+				h.emitRetry(RetryEvent{
+					Attempt:    retryCount,
+					StatusCode: 0,
+					Failover:   true,
+					TargetURL:  h.fallbackTargetString(),
+				})
+				continue
+			}
+			return nil, retryCount, failoverUsed, err
+		}
+
+		// Non-retryable status or final attempt reached: return upstream response verbatim.
+		if !isRetryableStatus(resp.StatusCode) || !replayable || attempt+1 >= maxAttempts {
+			return resp, retryCount, failoverUsed, nil
+		}
+
+		// If a fallback upstream/key is configured and hasn't been tried yet, fail over immediately.
+		if h.hasFallback() && !useFallback {
+			status := resp.StatusCode
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+
+			useFallback = true
+			failoverUsed = true
+			retryCount++
+			h.emitRetry(RetryEvent{
+				Attempt:    retryCount,
+				StatusCode: status,
+				Failover:   true,
+				TargetURL:  h.fallbackTargetString(),
+			})
+			continue
+		}
+
+		// Determine pause duration from Retry-After header or exponential backoff (1s -> 2s).
+		delay, hasRetryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		if hasRetryAfter {
+			if delay > h.maxRetryAfter {
+				// Long cooldown requested by upstream: pass 429/529 through immediately instead of stalling.
+				return resp, retryCount, failoverUsed, nil
+			}
+		} else {
+			delay = h.retryBaseDelay << attempt
+		}
+
+		status := resp.StatusCode
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		retryCount++
+		h.emitRetry(RetryEvent{
+			Attempt:    retryCount,
+			StatusCode: status,
+			Delay:      delay,
+			Failover:   useFallback,
+			TargetURL:  base.String(),
+		})
+
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-r.Context().Done():
+				timer.Stop()
+				return nil, retryCount, failoverUsed, r.Context().Err()
+			case <-timer.C:
+			}
+		}
+	}
+
+	return nil, retryCount, failoverUsed, fmt.Errorf("exhausted retry attempts")
+}
+
+func (h *Handler) emitRetry(ev RetryEvent) {
+	if h.onRetry != nil {
+		h.onRetry(ev)
+	}
+}
+
+func (h *Handler) fallbackTargetString() string {
+	if h.fallbackUpstream != nil {
+		return h.fallbackUpstream.String()
+	}
+	return h.upstream.String() + " (fallback api key)"
+}
+
+func isRetryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code == 529
+}
+
+// parseRetryAfter parses an HTTP Retry-After header (seconds or HTTP-date).
+func parseRetryAfter(val string) (time.Duration, bool) {
+	v := strings.TrimSpace(val)
+	if v == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			secs = 0
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if ts, err := http.ParseTime(v); err == nil {
+		d := time.Until(ts)
+		if d < 0 {
+			d = 0
+		}
+		return d, true
+	}
+	return 0, false
 }
 
 func pricingUsageFromAnthropic(u anthropic.Usage) pricing.Usage {

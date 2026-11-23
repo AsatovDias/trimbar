@@ -52,6 +52,9 @@ func TestLoadFromTOMLAndEnv(t *testing.T) {
 host = "127.0.0.1"
 port = 9091
 upstream_url = "https://example.anthropic.test/"
+fallback_upstream = "https://backup.anthropic.test/"
+fallback_api_key = "sk-ant-fallback-123"
+max_retries = 3
 trim_enabled = true
 `
 	if err := os.WriteFile(filepath.Join(dir, DefaultConfigFile), []byte(tomlContent), 0o600); err != nil {
@@ -63,6 +66,9 @@ trim_enabled = true
 	t.Setenv("TRIMBAR_UPSTREAM_URL", "")
 	t.Setenv("TRIMBAR_HOST", "")
 	t.Setenv("TRIMBAR_TRIM_ENABLED", "")
+	t.Setenv("TRIMBAR_FALLBACK_UPSTREAM", "")
+	t.Setenv("TRIMBAR_FALLBACK_API_KEY", "")
+	t.Setenv("TRIMBAR_MAX_RETRIES", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -70,6 +76,15 @@ trim_enabled = true
 	}
 	if !cfg.TrimEnabled {
 		t.Errorf("TrimEnabled = false, want true from config.toml")
+	}
+	if cfg.FallbackUpstream != "https://backup.anthropic.test" {
+		t.Errorf("FallbackUpstream = %q, want https://backup.anthropic.test", cfg.FallbackUpstream)
+	}
+	if cfg.FallbackAPIKey != "sk-ant-fallback-123" {
+		t.Errorf("FallbackAPIKey = %q, want sk-ant-fallback-123", cfg.FallbackAPIKey)
+	}
+	if cfg.MaxRetries != 3 {
+		t.Errorf("MaxRetries = %d, want 3", cfg.MaxRetries)
 	}
 	if cfg.Port != 9099 {
 		t.Errorf("Port = %d, want 9099 (env override)", cfg.Port)

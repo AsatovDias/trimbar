@@ -21,6 +21,8 @@ When running Claude Code on real repositories, token burn and latency spikes are
 - **Exact Prompt Cache & Cost Accounting:** Extracts `input_tokens`, `cache_creation_input_tokens` (5m & 1h TTL), `cache_read_input_tokens`, and `output_tokens` from Anthropic SSE streams and non-streaming responses, computing exact USD spend, net cache savings, and **honest shadow savings** weighted by your actual blended prompt rate.
 - **Context Inspector:** Detects redundant `Read` calls (ignoring legitimate re-reads after `Edit`/`Write` and distinct `offset`/`limit` slices) and ANSI CSI/OSC escape sequence overhead inside `tool_result` blocks.
 - **Cache-Safe Active Trimming (`--trim`):** Opt-in outbound request optimizer that strips ANSI codes and deduplicates redundant full-file `Read` results strictly **after** the last `cache_control` breakpoint — preserving the frozen prompt cache prefix byte-for-byte while tracking actual trimmed tokens and USD saved.
+- **Embedded Offline Web UI (`/ui`):** Built-in dark dashboard embedded directly into the single binary via `go:embed` (zero external CDNs) with live KPI cards, `/api/stats` & `/api/inspect` endpoints, and an interactive **Context Flamegraph** showing System, Tools, Tool Outputs, Dup Read/Trimmed waste, ANSI noise, and Chat History per turn.
+- **Auto-Retry & Failover (`429` / `529`):** Automatically recovers from transient Anthropic rate limits (`429`) and overload (`529`) before SSE streaming starts — retrying up to 2× with `Retry-After` / exponential backoff (`1s → 2s`) or instantly failing over to a configured `fallback_upstream` / `fallback_api_key`.
 - **Cache Miss Anomaly Detection:** Tracks consecutive main-agent turns per session and flags sudden drops in cache hit rate accompanied by large cache-creation spikes.
 - **Automatic Git & Role Attribution:** Extracts `cwd` from Claude Code's system prompt and resolves the local Git repository and branch directly from `.git` (including worktrees and detached HEADs) — no agent configuration required. Distinguishes `[main]` agent turns from `[sub]` background Haiku sub-agents.
 - **Transparent Pass-Through:** Preserves all headers (`x-api-key`, OAuth `Authorization`, `anthropic-beta`, `anthropic-version`) and passes upstream errors (`429 Too Many Requests`, `529 Overloaded`, `Retry-After`, `anthropic-ratelimit-*`) through verbatim so Claude Code's own retry logic works untouched.
@@ -90,6 +92,31 @@ When you opt in with `trimbar start --trim` (or `trim_enabled = true` in `~/.tri
 
 ---
 
+## Local Offline Web UI & Context Flamegraph
+
+Whenever `trimbar start` is running, open the embedded local dashboard in your browser:
+
+```text
+http://127.0.0.1:8787/ui
+```
+
+- **100% Offline (`go:embed`):** Pure dark-mode HTML/CSS/JS bundled inside the Go binary with zero external CDNs or telemetry.
+- **Live KPI Cards:** Total Spend, Cache Hit Rate progress bar & net cache savings, Actual Trimmed Tokens & USD Saved, and Cache Anomalies / Retry / Failover counters.
+- **Interactive Context Flamegraph:** Horizontal proportional bars per turn breaking down `System`, `Tools`, `Tool Outputs`, `Dup Read / Trimmed` (striped amber), `ANSI Noise`, and `Chat History`. Hover any segment for exact token share, or click any turn to inspect duplicate `Read` files, trim savings, and anomaly details.
+- **Local JSON APIs:** `GET /api/stats` and `GET /api/inspect` (supporting `?since=24h`, `?repo=...`, `?branch=...`, `?limit=...`).
+
+---
+
+## Resilience: Auto-Retry & Failover (`429` / `529`)
+
+When Anthropic returns `429 Too Many Requests` or `529 Overloaded` **before SSE streaming begins**, Trimbar automatically protects your Claude Code session:
+
+- **Auto-Retry:** Executes up to `max_retries` (default `2`) safe retries, honoring short `Retry-After` headers or applying exponential backoff (`1s → 2s`). Long cooldowns (`Retry-After > 5s`) are passed through immediately so Claude Code's native backoff UI handles them without stalling.
+- **Instant Failover:** Configure `fallback_upstream` and/or `fallback_api_key` in `~/.trimbar/config.toml` to fail over immediately on `429`/`529` or primary transport errors.
+- **Full Visibility:** Retries and failovers are logged live in the terminal (`RETRY` / `FAILOVER`) and persisted to SQLite (`retry_count`, `failover_used`) for `trimbar stats`, `trimbar inspect`, and the Web UI.
+
+---
+
 ## Try Without an API Key (`trimbar demo`)
 
 Don't have an Anthropic API key handy? Run the built-in 6-turn Claude Code simulator through the real local proxy and mock Anthropic SSE server:
@@ -105,14 +132,16 @@ Don't have an Anthropic API key handy? Run the built-in 6-turn Claude Code simul
 ./trimbar inspect
 ```
 
-Want to watch live streaming telemetry inside `trimbar start`? Open two terminals:
+Want to preview the **live terminal stream AND the Web UI Context Flamegraph** without an API key? Open two terminals:
 
 ```bash
-# Terminal 1: start proxy backed by the built-in local mock Anthropic API
+# Terminal 1: start proxy + Web UI backed by the built-in local mock Anthropic API
 ./trimbar start --mock --trim
 
 # Terminal 2: send 6 simulated Claude Code turns through the running proxy
 ./trimbar demo --proxy http://127.0.0.1:8787
+
+# Open in browser: http://127.0.0.1:8787/ui
 ```
 
 ---
@@ -223,8 +252,9 @@ Claude Code CLI
 
 - `cmd/trimbar/` — Cobra CLI (`start`, `stats`, `inspect`, `demo`, `version`) with Lipgloss tables & progress bars.
 - `internal/config/` — Defaults, `~/.trimbar/config.toml` & `TRIMBAR_*` env loader, Anthropic pricing table.
-- `internal/proxy/` — HTTP server, header-preserving reverse proxy, zero-buffer SSE tee forwarder.
+- `internal/proxy/` — HTTP server, header-preserving reverse proxy, zero-buffer SSE tee forwarder, and `429`/`529` auto-retry & failover engine.
 - `internal/trimmer/` — Cache-safe active request trimmer (frozen-prefix boundary enforcement, post-cache ANSI stripping & duplicate `Read` deduplication).
+- `internal/webui/` — Embedded offline dark dashboard (`GET /ui` via `go:embed`) with Context Flamegraph and JSON endpoints (`/api/stats`, `/api/inspect`).
 - `internal/anthropic/` — Anthropic `/v1/messages` request/SSE types, stateful SSE parser, duplicate `Read` & ANSI detector, Cache Miss Anomaly detector.
 - `internal/gitmeta/` — Extracts `cwd` from Claude Code system prompts and resolves `.git` repo, branch, worktrees, and stable `session_id`.
 - `internal/pricing/` — Exact Anthropic USD cost, net cache savings, honest shadow savings, and actual trimmed USD calculator.
@@ -242,9 +272,14 @@ host = "127.0.0.1"
 port = 8787
 upstream_url = "https://api.anthropic.com"
 trim_enabled = false
+
+# Optional resilience & failover settings
+max_retries = 2
+fallback_upstream = ""
+fallback_api_key = ""
 ```
 
-Supported environment variables: `TRIMBAR_HOST`, `TRIMBAR_PORT`, `TRIMBAR_UPSTREAM_URL`, `TRIMBAR_DATA_DIR`, `TRIMBAR_TRIM_ENABLED`.
+Supported environment variables: `TRIMBAR_HOST`, `TRIMBAR_PORT`, `TRIMBAR_UPSTREAM_URL`, `TRIMBAR_DATA_DIR`, `TRIMBAR_TRIM_ENABLED`, `TRIMBAR_MAX_RETRIES`, `TRIMBAR_FALLBACK_UPSTREAM`, `TRIMBAR_FALLBACK_API_KEY`.
 
 ---
 
@@ -259,10 +294,11 @@ The test suite verifies:
 - Zero-buffering SSE forwarding latency (`<50ms` per chunk, verified non-buffered delivery)
 - Fragmented SSE & prompt cache token parsing (`input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`, 5m/1h TTL)
 - Cache-safe active trimming: byte-for-byte frozen prefix preservation up to the last `cache_control`, post-cache duplicate `Read` & ANSI trimming, and `Edit`/`Write` deduplication reset
+- Auto-retry on `429`/`529` (with exponential backoff & `Retry-After`), instant failover to `fallback_upstream` / `fallback_api_key`, and verbatim error pass-through when retries are exhausted
+- Embedded offline Web UI (`GET /ui` with zero external CDNs, `/api/stats`, `/api/inspect`)
 - Duplicate `Read` detection (with `Edit`/`Write` invalidation & `offset`/`limit` awareness) and ANSI escape detection
-- Verbatim `429` & `529` error and header pass-through
 - Git repo/branch/worktree & `session_id` resolution
-- SQLite WAL mode initialization, safe v1→v2 `ALTER TABLE` migration, stats aggregation, and end-to-end `trimbar demo` / `trimbar demo --trim` pipelines
+- SQLite WAL mode initialization, safe v1→v3 `ALTER TABLE` migrations, stats aggregation, and end-to-end `trimbar demo` / `trimbar demo --trim` pipelines
 
 ---
 
@@ -271,8 +307,8 @@ The test suite verifies:
 - [x] **Phase 0 — Transparent Gateway:** Zero-buffer SSE reverse proxy, header preservation, verbatim `429`/`529` error pass-through, Anthropic SSE usage & cache parser.
 - [x] **Phase 1 — Observability MVP (`v0.1.0`):** Pure-Go SQLite WAL storage, automatic Git repo/branch & `session_id` attribution, Main vs Sub-agent classification, duplicate `Read` & ANSI detectors, Cache Miss Anomaly alerts, `trimbar start` / `stats` / `inspect` / `demo` CLI.
 - [x] **Phase 2 — Cache-Safe Active Trimming (`v0.2.0`):** Opt-in `--trim` mode preserving the frozen `cache_control` prefix byte-for-byte while stripping ANSI escape noise and deduplicating redundant full-file `Read` results after the cache boundary, with actual trimmed token & USD tracking.
-- [ ] **Phase 3 — Diagnostics & TUI:** Interactive Bubble Tea live dashboard (`trimbar top`), MCP tool-schema diffing to pinpoint the exact root cause of Cache Miss Anomalies, budget alerts per branch/day.
-- [ ] **Phase 4 — Ecosystem:** Homebrew / Scoop / multi-platform GitHub Releases binaries for macOS, Linux, and Windows, plus OpenAI/Bedrock/Vertex Anthropic endpoint support.
+- [x] **Phase 3 — Local Web UI & Resilience (`v0.3.0`):** Embedded offline Web UI (`http://127.0.0.1:8787/ui`) with interactive Context Flamegraph, JSON APIs (`/api/stats`, `/api/inspect`), and automatic `429`/`529` retry + failover (`fallback_upstream` / `fallback_api_key`).
+- [ ] **Phase 4 — Deep Diagnostics & Ecosystem:** MCP tool-schema diffing to pinpoint exact root causes of Cache Miss Anomalies, daily/branch budget alerts, Homebrew / Scoop / multi-platform GitHub Releases binaries (macOS, Linux, Windows), and Bedrock/Vertex Anthropic endpoint support.
 
 ---
 

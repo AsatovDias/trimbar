@@ -21,9 +21,10 @@ import (
 	"github.com/trimbar/trimbar/internal/gitmeta"
 	"github.com/trimbar/trimbar/internal/proxy"
 	"github.com/trimbar/trimbar/internal/storage"
+	"github.com/trimbar/trimbar/internal/webui"
 )
 
-var version = "0.2.0"
+var version = "0.3.0"
 
 // Lipgloss styles for terminal output.
 var (
@@ -144,12 +145,30 @@ func newStartCmd() *cobra.Command {
 				printLiveEvent(rec)
 			}
 
-			srv, err := proxy.NewServer(cfg, proxy.WithOnComplete(onComplete))
+			onRetry := func(re proxy.RetryEvent) {
+				ts := styleMuted.Render(time.Now().Format("15:04:05"))
+				if re.Failover {
+					fmt.Printf("%s %s HTTP %d -> failover #%d to %s\n",
+						ts, styleWarn.Render("FAILOVER"), re.StatusCode, re.Attempt, re.TargetURL)
+				} else {
+					fmt.Printf("%s %s HTTP %d -> retry #%d after %s\n",
+						ts, styleWarn.Render("RETRY   "), re.StatusCode, re.Attempt, re.Delay.Round(time.Millisecond))
+				}
+			}
+
+			uiHandler := webui.NewHandler(repo)
+			srv, err := proxy.NewServer(
+				cfg,
+				proxy.WithOnComplete(onComplete),
+				proxy.WithOnRetry(onRetry),
+				proxy.WithWebUI(uiHandler),
+			)
 			if err != nil {
 				return fmt.Errorf("create proxy server: %w", err)
 			}
 
 			listenURL := fmt.Sprintf("http://%s", cfg.ListenAddr())
+			webUIURL := listenURL + "/ui"
 			usageHint := fmt.Sprintf("  ANTHROPIC_BASE_URL=%s claude", listenURL)
 			upstreamLabel := cfg.UpstreamURL
 			if mockMode {
@@ -164,6 +183,7 @@ func newStartCmd() *cobra.Command {
 				styleBrand.Render("TRIMBAR") + " " + styleMuted.Render("v"+version+" · Claude Code Local Gateway"),
 				"",
 				fmt.Sprintf("%s  %s", styleMuted.Render("Listen:  "), styleOK.Render(listenURL)),
+				fmt.Sprintf("%s  %s", styleMuted.Render("Web UI:  "), styleTitle.Render(webUIURL)),
 				fmt.Sprintf("%s  %s", styleMuted.Render("Upstream:"), upstreamLabel),
 				fmt.Sprintf("%s  %s", styleMuted.Render("Mode:    "), modeLabel),
 				fmt.Sprintf("%s  %s", styleMuted.Render("Database:"), cfg.DBPath),
@@ -342,6 +362,8 @@ func buildRequestLog(ev proxy.ProxyEvent, resolver *gitmeta.Resolver, repo *stor
 		NetCacheSavingsUSD: ev.Cost.NetCacheSavingsUSD,
 		ShadowSavingsUSD:   ev.ShadowSavings.HonestSavingsUSD,
 		TrimmedSavingsUSD:  ev.TrimmedSavingsUSD,
+		RetryCount:         ev.RetryCount,
+		FailoverUsed:       ev.FailoverUsed,
 		ErrorBody:          ev.ErrorBody,
 		AgentRole:          anthropic.AgentRoleMain,
 	}
@@ -441,6 +463,11 @@ func printLiveEvent(rec *storage.RequestLog) {
 	var flags []string
 	if rec.TrimmedTokens > 0 {
 		flags = append(flags, styleOK.Render(fmt.Sprintf("TRIM:-%s", formatTokens(int64(rec.TrimmedTokens)))))
+	}
+	if rec.FailoverUsed {
+		flags = append(flags, styleWarn.Render("FAILOVER"))
+	} else if rec.RetryCount > 0 {
+		flags = append(flags, styleWarn.Render(fmt.Sprintf("RETRY:%d", rec.RetryCount)))
 	}
 	if rec.CacheMissAnomaly {
 		flags = append(flags, styleErr.Render("CACHE-MISS"))
@@ -567,6 +594,10 @@ func renderStats(s *storage.StatsSummary, window string) {
 		styleOK.Render(formatTokens(s.TotalTrimmedTokens)+" tokens"),
 		styleOK.Render(fmt.Sprintf("$%.4f USD saved", s.TotalTrimmedSavingsUSD)),
 	)
+	if s.TotalRetries > 0 || s.TotalFailovers > 0 {
+		fmt.Printf("  Resilience (Retries / Failover): %d retries · %d failovers\n",
+			s.TotalRetries, s.TotalFailovers)
+	}
 }
 
 func renderInspect(rep *storage.InspectReport) {
@@ -622,6 +653,11 @@ func renderInspect(rep *storage.InspectReport) {
 		}
 		if t.TrimmedTokens > 0 {
 			flags = append(flags, styleOK.Render(fmt.Sprintf("TRIM:-%s", formatTokens(int64(t.TrimmedTokens)))))
+		}
+		if t.FailoverUsed {
+			flags = append(flags, styleWarn.Render("FAILOVER"))
+		} else if t.RetryCount > 0 {
+			flags = append(flags, styleWarn.Render(fmt.Sprintf("RETRY:%d", t.RetryCount)))
 		}
 		if t.CacheMissAnomaly {
 			flags = append(flags, styleErr.Render("CACHE-MISS"))

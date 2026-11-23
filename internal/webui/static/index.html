@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trimbar — Local Context Profiler &amp; Gateway</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #121722;
+    --panel-2: #171d2b;
+    --border: #242d3f;
+    --text: #e6edf7;
+    --muted: #8b98b1;
+    --accent: #38bdf8;
+    --green: #10b981;
+    --amber: #f59e0b;
+    --rose: #f43f5e;
+    --indigo: #6366f1;
+    --cyan: #06b6d4;
+    --violet: #8b5cf6;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 24px 48px; }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 12px; padding-bottom: 18px; border-bottom: 1px solid var(--border); margin-bottom: 20px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-logo {
+    background: linear-gradient(135deg, #ec4899, #6366f1);
+    color: #fff; font-weight: 800; font-family: var(--mono);
+    padding: 5px 10px; border-radius: 8px; letter-spacing: 0.08em; font-size: 13px;
+  }
+  .brand-sub { color: var(--muted); font-size: 13px; }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+    box-shadow: 0 0 8px var(--green); display: inline-block; margin-right: 6px;
+  }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  select, button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+    font-family: var(--sans);
+  }
+  button:hover, select:hover { border-color: #3b4b68; background: var(--panel-2); }
+  button.active { border-color: var(--accent); color: var(--accent); }
+
+  .kpi-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 14px; margin-bottom: 20px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px;
+  }
+  .kpi-label {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted); margin-bottom: 6px;
+  }
+  .kpi-value {
+    font-size: 26px; font-weight: 700; font-family: var(--mono);
+    letter-spacing: -0.02em; margin-bottom: 6px;
+  }
+  .kpi-sub { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .c-green { color: var(--green); }
+  .c-amber { color: var(--amber); }
+  .c-rose { color: var(--rose); }
+  .c-accent { color: var(--accent); }
+
+  .progress-track {
+    height: 8px; border-radius: 999px; background: #1e2637; overflow: hidden; margin: 8px 0 6px;
+  }
+  .progress-fill {
+    height: 100%; border-radius: 999px;
+    background: linear-gradient(90deg, #06b6d4, #10b981);
+    transition: width 0.35s ease;
+  }
+
+  .section-title {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+    font-size: 13px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--accent); margin: 0 0 12px;
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); font-weight: 500; text-transform: none; letter-spacing: 0; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .sw-sys { background: var(--indigo); }
+  .sw-tools { background: var(--cyan); }
+  .sw-out { background: var(--green); }
+  .sw-dup {
+    background: repeating-linear-gradient(
+      -45deg, #f59e0b, #f59e0b 4px, #b45309 4px, #b45309 8px
+    );
+  }
+  .sw-ansi { background: var(--rose); }
+  .sw-chat { background: var(--violet); }
+
+  .flamegraph-list { display: flex; flex-direction: column; gap: 8px; }
+  .fg-row {
+    display: grid; grid-template-columns: 230px 1fr 165px; align-items: center; gap: 12px;
+    padding: 8px 10px; border-radius: 8px; background: var(--panel-2);
+    border: 1px solid transparent; cursor: pointer; transition: border-color 0.15s;
+  }
+  .fg-row:hover { border-color: #364461; }
+  .fg-row.selected { border-color: var(--accent); background: #182132; }
+  @media (max-width: 860px) {
+    .fg-row { grid-template-columns: 1fr; gap: 6px; }
+  }
+  .fg-meta { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fg-meta .sub { color: var(--muted); font-size: 11px; display: block; margin-top: 2px; }
+  .fg-bar {
+    height: 26px; width: 100%; background: #0d121c; border-radius: 6px;
+    overflow: hidden; display: flex; border: 1px solid #222b3d;
+  }
+  .fg-seg {
+    height: 100%; display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.92);
+    overflow: hidden; white-space: nowrap; transition: filter 0.15s;
+  }
+  .fg-seg:hover { filter: brightness(1.18); }
+  .fg-right { text-align: right; font-family: var(--mono); font-size: 12px; }
+
+  .badge {
+    display: inline-block; padding: 1px 6px; border-radius: 5px; font-family: var(--mono);
+    font-size: 10px; font-weight: 700; margin-left: 4px; vertical-align: middle;
+  }
+  .b-main { background: rgba(56,189,248,0.16); color: var(--accent); }
+  .b-sub { background: rgba(139,92,246,0.18); color: #c4b5fd; }
+  .b-trim { background: rgba(16,185,129,0.18); color: var(--green); }
+  .b-warn { background: rgba(245,158,11,0.18); color: var(--amber); }
+  .b-err { background: rgba(244,63,94,0.2); color: var(--rose); }
+
+  .detail-box {
+    margin-top: 14px; padding: 14px 16px; border-radius: 10px;
+    background: #0e1420; border: 1px solid var(--border);
+    font-family: var(--mono); font-size: 12px;
+  }
+  .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 8px; }
+  .detail-kv span { display: block; color: var(--muted); font-size: 11px; }
+
+  .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; margin-top: 20px; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  th {
+    text-align: left; color: var(--muted); font-weight: 600; font-size: 11px;
+    padding: 8px 6px; border-bottom: 1px solid var(--border);
+  }
+  td { padding: 8px 6px; border-bottom: 1px solid #1b2232; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; }
+
+  .empty {
+    text-align: center; padding: 36px 16px; color: var(--muted); font-family: var(--mono);
+  }
+  .tooltip {
+    position: fixed; pointer-events: none; z-index: 9999; display: none;
+    background: #0a0f1a; border: 1px solid var(--accent); border-radius: 8px;
+    padding: 8px 10px; font-family: var(--mono); font-size: 12px; color: var(--text);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.6); max-width: 300px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <span class="brand-logo">TRIMBAR</span>
+      <div>
+        <div style="font-weight:700;font-size:15px;">Local Context Profiler &amp; Gateway</div>
+        <div class="brand-sub"><span class="live-dot"></span>100% Local SQLite Telemetry · Zero External CDN</div>
+      </div>
+    </div>
+    <div class="controls">
+      <select id="windowSel" title="Time window">
+        <option value="all">Window: All time</option>
+        <option value="24h">Window: Last 24h</option>
+        <option value="7d">Window: Last 7d</option>
+      </select>
+      <select id="repoSel" title="Filter by Git repo">
+        <option value="">All Repositories</option>
+      </select>
+      <button id="autoBtn" class="active" type="button">Auto-refresh: ON</button>
+      <button id="refreshBtn" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <section class="kpi-grid">
+    <div class="card">
+      <div class="kpi-label">Total Spend</div>
+      <div class="kpi-value c-green" id="kpiSpend">$0.0000</div>
+      <div class="kpi-sub" id="kpiReqs">0 reqs · avg 0ms</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Cache Hit Rate</div>
+      <div class="kpi-value c-accent" id="kpiHit">0.0%</div>
+      <div class="progress-track"><div class="progress-fill" id="kpiHitBar" style="width:0%"></div></div>
+      <div class="kpi-sub" id="kpiCacheSave">net cache savings $0.0000</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Actual Trimmed Tokens &amp; Saved</div>
+      <div class="kpi-value c-green" id="kpiTrimmed">0 tok</div>
+      <div class="kpi-sub" id="kpiTrimSub">$0.0000 USD saved · shadow ~$0.0000</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Cache Anomalies &amp; Resilience</div>
+      <div class="kpi-value" id="kpiAnomalies">0</div>
+      <div class="kpi-sub" id="kpiResilience">dup reads 0 · retries 0 · failovers 0</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="section-title">
+      <span>Context Flamegraph (Recent Turns)</span>
+      <div class="legend">
+        <span class="legend-item"><span class="swatch sw-sys"></span>System</span>
+        <span class="legend-item"><span class="swatch sw-tools"></span>Tools</span>
+        <span class="legend-item"><span class="swatch sw-out"></span>Tool Outputs</span>
+        <span class="legend-item"><span class="swatch sw-dup"></span>Dup Read / Trimmed</span>
+        <span class="legend-item"><span class="swatch sw-ansi"></span>ANSI Noise</span>
+        <span class="legend-item"><span class="swatch sw-chat"></span>Chat History</span>
+      </div>
+    </div>
+    <div id="flamegraph" class="flamegraph-list">
+      <div class="empty">Loading telemetry...</div>
+    </div>
+    <div id="turnDetail" class="detail-box" style="display:none;"></div>
+  </section>
+
+  <section class="two-col">
+    <div class="card">
+      <div class="section-title"><span>By Model</span></div>
+      <div id="modelTable"></div>
+    </div>
+    <div class="card">
+      <div class="section-title"><span>By Git Repo &amp; Branch</span></div>
+      <div id="repoTable"></div>
+    </div>
+  </section>
+
+  <section class="two-col">
+    <div class="card">
+      <div class="section-title"><span>Duplicate Read Hotspots</span></div>
+      <div id="hotspotTable"></div>
+    </div>
+    <div class="card">
+      <div class="section-title"><span>Cache Miss Anomalies</span></div>
+      <div id="anomalyList"></div>
+    </div>
+  </section>
+</div>
+
+<div id="tooltip" class="tooltip"></div>
+
+<script>
+(function() {
+  let autoRefresh = true;
+  let timer = null;
+  let selectedTurnId = null;
+  let latestTurns = [];
+
+  const $ = (id) => document.getElementById(id);
+  const tooltip = $('tooltip');
+
+  function fmtTokens(n) {
+    n = Number(n || 0);
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+    return String(Math.round(n));
+  }
+  function fmtUSD(v) { return '$' + Number(v || 0).toFixed(4); }
+  function shortModel(m) {
+    if (!m) return '(unknown)';
+    return m.replace(/^claude-/, '').replace(/-\d{8}$/, '');
+  }
+  function fmtTime(ts) {
+    try {
+      return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch { return ts || ''; }
+  }
+  function esc(s) {
+    return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function showTooltip(e, html) {
+    tooltip.innerHTML = html;
+    tooltip.style.display = 'block';
+    const x = Math.min(window.innerWidth - 320, e.clientX + 14);
+    const y = Math.min(window.innerHeight - 100, e.clientY + 14);
+    tooltip.style.left = Math.max(8, x) + 'px';
+    tooltip.style.top = Math.max(8, y) + 'px';
+  }
+  function hideTooltip() { tooltip.style.display = 'none'; }
+
+  function renderStats(s) {
+    $('kpiSpend').textContent = fmtUSD(s.total_cost_usd);
+    $('kpiReqs').textContent = `${s.total_requests} reqs (main ${s.main_agent_requests} · sub ${s.subagent_requests} · err ${s.error_requests}) · avg ${Math.round(s.avg_latency_ms || 0)}ms`;
+
+    const hitPct = (s.cache_hit_ratio || 0) * 100;
+    $('kpiHit').textContent = hitPct.toFixed(1) + '%';
+    $('kpiHitBar').style.width = Math.max(0, Math.min(100, hitPct)) + '%';
+    $('kpiCacheSave').textContent = `net cache savings ${fmtUSD(s.total_net_cache_savings_usd)} · read ${fmtTokens(s.cache_read_tokens)}`;
+
+    $('kpiTrimmed').textContent = fmtTokens(s.total_trimmed_tokens) + ' tok';
+    $('kpiTrimSub').textContent = `${fmtUSD(s.total_trimmed_savings_usd)} USD saved · shadow ~${fmtUSD(s.total_shadow_savings_usd)}`;
+
+    const anomEl = $('kpiAnomalies');
+    anomEl.textContent = String(s.cache_miss_anomalies || 0);
+    anomEl.className = 'kpi-value ' + ((s.cache_miss_anomalies || 0) > 0 ? 'c-rose' : 'c-green');
+    $('kpiResilience').textContent = `dup reads ${s.duplicate_read_calls || 0} · retries ${s.total_retries || 0} · failovers ${s.total_failovers || 0}`;
+
+    // Populate repo selector once/keep selection
+    const repoSel = $('repoSel');
+    const prevRepo = repoSel.value;
+    const repos = new Set();
+    (s.by_repo_branch || []).forEach(r => { if (r.repo && r.repo !== '(no-git)') repos.add(r.repo); });
+    if (repos.size > 0 && !prevRepo) {
+      repoSel.innerHTML = '<option value="">All Repositories</option>' +
+        Array.from(repos).sort().map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join('');
+    }
+
+    // By model table
+    const models = s.by_model || [];
+    $('modelTable').innerHTML = models.length === 0
+      ? '<div class="empty">No model data yet.</div>'
+      : `<table><thead><tr><th>Model</th><th class="num">Reqs</th><th class="num">Read</th><th class="num">Write</th><th class="num">Hit%</th><th class="num">Cost</th></tr></thead><tbody>` +
+        models.map(m => `<tr><td>${esc(shortModel(m.model))}</td><td class="num">${m.requests}</td><td class="num">${fmtTokens(m.cache_read_tokens)}</td><td class="num">${fmtTokens(m.cache_creation_tokens)}</td><td class="num">${((m.cache_hit_ratio||0)*100).toFixed(1)}%</td><td class="num c-green">${fmtUSD(m.cost_usd)}</td></tr>`).join('') +
+        '</tbody></table>';
+
+    // By repo/branch table
+    const rbs = s.by_repo_branch || [];
+    $('repoTable').innerHTML = rbs.length === 0
+      ? '<div class="empty">No repository data yet.</div>'
+      : `<table><thead><tr><th>Repo</th><th>Branch</th><th class="num">Reqs</th><th class="num">Hit%</th><th class="num">Cost</th></tr></thead><tbody>` +
+        rbs.map(r => `<tr><td>${esc(r.repo)}</td><td style="color:var(--muted)">${esc(r.branch)}</td><td class="num">${r.requests}</td><td class="num">${((r.cache_hit_ratio||0)*100).toFixed(1)}%</td><td class="num c-green">${fmtUSD(r.cost_usd)}</td></tr>`).join('') +
+        '</tbody></table>';
+  }
+
+  function buildSegments(t) {
+    const sys = t.system_est_tokens || 0;
+    const tools = t.tools_est_tokens || 0;
+    const toolResTotal = t.tool_results_est_tokens || 0;
+    const dupTok = Math.min(toolResTotal, Math.max(t.duplicate_read_wasted_tokens || 0, t.trimmed_tokens || 0));
+    const ansiTok = Math.min(Math.max(0, toolResTotal - dupTok), t.ansi_wasted_tokens || 0);
+    const cleanOut = Math.max(0, toolResTotal - dupTok - ansiTok);
+    const chat = Math.max(0, (t.messages_est_tokens || 0) - toolResTotal);
+    const total = sys + tools + cleanOut + dupTok + ansiTok + chat;
+
+    if (total <= 0) {
+      return [{ key: 'chat', label: 'Prompt', cls: 'sw-chat', tokens: (t.input_tokens||0)+(t.cache_read_tokens||0)+(t.cache_creation_tokens||0), pct: 100 }];
+    }
+    const raw = [
+      { key: 'sys', label: 'System', cls: 'sw-sys', tokens: sys },
+      { key: 'tools', label: 'Tools', cls: 'sw-tools', tokens: tools },
+      { key: 'out', label: 'Tool Outputs', cls: 'sw-out', tokens: cleanOut },
+      { key: 'dup', label: (t.trimmed_tokens > 0 ? 'Dup Read (Trimmed)' : 'Dup Read Waste'), cls: 'sw-dup', tokens: dupTok },
+      { key: 'ansi', label: 'ANSI Noise', cls: 'sw-ansi', tokens: ansiTok },
+      { key: 'chat', label: 'Chat History', cls: 'sw-chat', tokens: chat },
+    ].filter(seg => seg.tokens > 0);
+    raw.forEach(seg => seg.pct = (seg.tokens / total) * 100);
+    return raw;
+  }
+
+  function renderTurnDetail(t) {
+    const box = $('turnDetail');
+    if (!t) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    const totIn = (t.input_tokens||0) + (t.cache_creation_tokens||0) + (t.cache_read_tokens||0);
+    const hit = totIn > 0 ? ((t.cache_read_tokens||0) / totIn * 100).toFixed(1) : '0.0';
+    const dups = (t.duplicate_reads || []).map(d => `${esc(d.FilePath)} (x${d.Count}, ~${fmtTokens(d.WastedEstTokens)} wasted)`).join(', ');
+    box.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <strong>Turn #${t.id} · ${esc(t.model || t.path)}</strong>
+        <span style="color:var(--muted)">session: ${esc(t.session_id || '-')} · ${esc(fmtTime(t.timestamp))}</span>
+      </div>
+      <div class="detail-grid">
+        <div class="detail-kv"><span>Repository</span>${esc(t.git_repo || '(no-git)')}@${esc(t.git_branch || '-')}</div>
+        <div class="detail-kv"><span>Tokens (in / read / write / out)</span>${fmtTokens(t.input_tokens)} / ${fmtTokens(t.cache_read_tokens)} / ${fmtTokens(t.cache_creation_tokens)} / ${fmtTokens(t.output_tokens)}</div>
+        <div class="detail-kv"><span>Cache Hit &amp; Cost</span>${hit}% · <span class="c-green">${fmtUSD(t.cost_usd)}</span> (${t.latency_ms}ms)</div>
+        <div class="detail-kv"><span>Active Trimming</span>${t.trimmed_tokens > 0 ? `<span class="c-green">-${fmtTokens(t.trimmed_tokens)} tok (${fmtUSD(t.trimmed_savings_usd)})</span>` : '0 tok (Shadow Mode)'}</div>
+        <div class="detail-kv"><span>Resilience</span>retries: ${t.retry_count || 0} · failover: ${t.failover_used ? 'YES' : 'no'}</div>
+        <div class="detail-kv"><span>Context Waste</span>dup reads: ${t.duplicate_read_count || 0} · ANSI seqs: ${t.ansi_sequence_count || 0}</div>
+      </div>
+      ${dups ? `<div style="margin-top:8px;color:var(--amber)">Duplicate Read files: ${dups}</div>` : ''}
+      ${t.cache_miss_anomaly ? `<div style="margin-top:6px;color:var(--rose)">Cache Miss Anomaly: ${esc(t.cache_miss_reason)}</div>` : ''}
+    `;
+  }
+
+  function renderInspect(rep) {
+    latestTurns = rep.turns || [];
+    const fg = $('flamegraph');
+    if (latestTurns.length === 0) {
+      fg.innerHTML = '<div class="empty">No requests captured yet. Run <code>trimbar demo --trim</code> or start Claude Code via Trimbar.</div>';
+      renderTurnDetail(null);
+    } else {
+      if (!selectedTurnId || !latestTurns.some(t => t.id === selectedTurnId)) {
+        selectedTurnId = latestTurns[0].id;
+      }
+      fg.innerHTML = latestTurns.map(t => {
+        const segs = buildSegments(t);
+        const totIn = (t.input_tokens||0) + (t.cache_creation_tokens||0) + (t.cache_read_tokens||0);
+        const hit = totIn > 0 ? ((t.cache_read_tokens||0) / totIn * 100).toFixed(0) : '0';
+        const roleBadge = t.agent_role === 'subagent'
+          ? '<span class="badge b-sub">SUB</span>'
+          : '<span class="badge b-main">MAIN</span>';
+        const flags = [
+          t.trimmed_tokens > 0 ? `<span class="badge b-trim">TRIM -${fmtTokens(t.trimmed_tokens)}</span>` : '',
+          t.cache_miss_anomaly ? '<span class="badge b-err">CACHE-MISS</span>' : '',
+          t.retry_count > 0 ? `<span class="badge b-warn">RETRY:${t.retry_count}</span>` : '',
+          t.failover_used ? '<span class="badge b-warn">FAILOVER</span>' : '',
+        ].filter(Boolean).join('');
+
+        const barsHTML = segs.map(seg => {
+          const w = Math.max(seg.pct, 1.5);
+          const lbl = seg.pct >= 12 ? `${seg.label} ${seg.pct.toFixed(0)}%` : '';
+          return `<div class="fg-seg ${seg.cls}" style="width:${w.toFixed(2)}%" data-label="${esc(seg.label)}" data-tok="${seg.tokens}" data-pct="${seg.pct.toFixed(1)}" data-trim="${t.trimmed_tokens||0}">${esc(lbl)}</div>`;
+        }).join('');
+
+        return `
+          <div class="fg-row ${t.id === selectedTurnId ? 'selected' : ''}" data-turn-id="${t.id}">
+            <div class="fg-meta">
+              ${esc(fmtTime(t.timestamp))} ${roleBadge} ${esc(shortModel(t.model))}
+              <span class="sub">${esc(t.git_repo || '(no-git)')}@${esc(t.git_branch || '-')}</span>
+            </div>
+            <div class="fg-bar">${barsHTML}</div>
+            <div class="fg-right">
+              <span class="c-green">${fmtUSD(t.cost_usd)}</span> · ${hit}% hit
+              <div style="margin-top:2px;">${flags}</div>
+            </div>
+          </div>`;
+      }).join('');
+
+      fg.querySelectorAll('.fg-row').forEach(row => {
+        row.addEventListener('click', () => {
+          selectedTurnId = Number(row.getAttribute('data-turn-id'));
+          fg.querySelectorAll('.fg-row').forEach(r => r.classList.toggle('selected', r === row));
+          renderTurnDetail(latestTurns.find(x => x.id === selectedTurnId));
+        });
+      });
+      fg.querySelectorAll('.fg-seg').forEach(seg => {
+        seg.addEventListener('mousemove', (e) => {
+          const lbl = seg.getAttribute('data-label');
+          const tok = Number(seg.getAttribute('data-tok'));
+          const pct = seg.getAttribute('data-pct');
+          showTooltip(e, `<strong>${esc(lbl)}</strong><br>${fmtTokens(tok)} est. tokens (${pct}%)`);
+        });
+        seg.addEventListener('mouseleave', hideTooltip);
+      });
+
+      renderTurnDetail(latestTurns.find(x => x.id === selectedTurnId));
+    }
+
+    // Duplicate Read hotspots
+    const hots = rep.duplicate_hotspots || [];
+    $('hotspotTable').innerHTML = hots.length === 0
+      ? '<div class="empty">No duplicate Read hotspots detected.</div>'
+      : `<table><thead><tr><th>File</th><th class="num">Redundant</th><th class="num">Wasted Tok</th></tr></thead><tbody>` +
+        hots.slice(0, 10).map(h => `<tr><td>${esc(h.file_path)}</td><td class="num c-amber">${h.redundant_reads}</td><td class="num">${fmtTokens(h.wasted_tokens)}</td></tr>`).join('') +
+        '</tbody></table>';
+
+    // Cache Miss Anomalies
+    const anoms = rep.cache_miss_anomalies || [];
+    $('anomalyList').innerHTML = anoms.length === 0
+      ? '<div class="empty" style="color:var(--green)">No Cache Miss Anomalies detected.</div>'
+      : `<table><thead><tr><th>Time</th><th>Session</th><th>Details</th></tr></thead><tbody>` +
+        anoms.map(a => `<tr><td>${esc(fmtTime(a.timestamp))}</td><td>${esc((a.session_id||'').slice(0, 14))}</td><td class="c-rose">${esc(a.cache_miss_reason)}</td></tr>`).join('') +
+        '</tbody></table>';
+  }
+
+  async function refresh() {
+    const since = $('windowSel').value;
+    const repo = $('repoSel').value;
+    const qs = new URLSearchParams();
+    if (since && since !== 'all') qs.set('since', since);
+    if (repo) qs.set('repo', repo);
+
+    const inspectQs = new URLSearchParams(qs);
+    inspectQs.set('limit', '20');
+
+    try {
+      const [statsRes, inspectRes] = await Promise.all([
+        fetch('/api/stats?' + qs.toString()),
+        fetch('/api/inspect?' + inspectQs.toString()),
+      ]);
+      if (statsRes.ok) renderStats(await statsRes.json());
+      if (inspectRes.ok) renderInspect(await inspectRes.json());
+    } catch (err) {
+      console.error('Trimbar refresh failed:', err);
+    }
+  }
+
+  function syncTimer() {
+    if (timer) clearInterval(timer);
+    if (autoRefresh) timer = setInterval(refresh, 5000);
+  }
+
+  $('windowSel').addEventListener('change', refresh);
+  $('repoSel').addEventListener('change', refresh);
+  $('refreshBtn').addEventListener('click', refresh);
+  $('autoBtn').addEventListener('click', () => {
+    autoRefresh = !autoRefresh;
+    $('autoBtn').textContent = 'Auto-refresh: ' + (autoRefresh ? 'ON' : 'OFF');
+    $('autoBtn').classList.toggle('active', autoRefresh);
+    syncTimer();
+  });
+
+  refresh();
+  syncTimer();
+})();
+</script>
+</body>
+</html>

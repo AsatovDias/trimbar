@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -561,5 +562,220 @@ func TestActiveTrimmingUpdatesOutboundBodyAndContentLength(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for telemetry event")
+	}
+}
+
+func TestAutoRetryOn429And529WithBackoff(t *testing.T) {
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		switch n {
+		case 1:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"try again"}}`)
+		case 2:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(529)
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`)
+		default:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_ok\",\"model\":\"claude-sonnet-4-20250514\",\"usage\":{\"input_tokens\":20,\"output_tokens\":1}}}\n\n")
+			_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":12}}\n\n")
+			_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		}
+	}))
+	defer upstream.Close()
+
+	var (
+		retryMu sync.Mutex
+		retries []RetryEvent
+	)
+	eventCh := make(chan ProxyEvent, 1)
+
+	cfg := config.Default()
+	cfg.UpstreamURL = upstream.URL
+	cfg.MaxRetries = 2
+	cfg.RetryBaseDelay = 15 * time.Millisecond
+
+	srv, err := NewServer(cfg,
+		WithOnRetry(func(re RetryEvent) {
+			retryMu.Lock()
+			retries = append(retries, re)
+			retryMu.Unlock()
+		}),
+		WithOnComplete(func(ev ProxyEvent) {
+			eventCh <- ev
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	proxySrv := httptest.NewServer(srv.ServeMux())
+	defer proxySrv.Close()
+
+	resp, err := http.Post(
+		proxySrv.URL+"/v1/messages",
+		"application/json",
+		strings.NewReader(`{"model":"claude-sonnet-4-20250514","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("final StatusCode = %d, want 200 after retries", resp.StatusCode)
+	}
+	if attempts.Load() != 3 {
+		t.Errorf("upstream attempts = %d, want 3", attempts.Load())
+	}
+
+	retryMu.Lock()
+	if len(retries) != 2 {
+		t.Fatalf("len(retries) = %d, want 2", len(retries))
+	}
+	if retries[0].StatusCode != 429 || retries[0].Delay != 15*time.Millisecond {
+		t.Errorf("retry[0] = %+v, want status=429 delay=15ms", retries[0])
+	}
+	if retries[1].StatusCode != 529 || retries[1].Delay != 30*time.Millisecond {
+		t.Errorf("retry[1] = %+v, want status=529 delay=30ms", retries[1])
+	}
+	retryMu.Unlock()
+
+	select {
+	case ev := <-eventCh:
+		if ev.RetryCount != 2 || ev.FailoverUsed {
+			t.Errorf("telemetry retry/failover = (%d, %v), want (2, false)", ev.RetryCount, ev.FailoverUsed)
+		}
+		if ev.StreamResult == nil || ev.StreamResult.Usage.OutputTokens != 12 {
+			t.Errorf("expected parsed SSE result after retry, got %+v", ev.StreamResult)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for telemetry")
+	}
+}
+
+func TestFailoverToFallbackUpstreamAndAPIKey(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(529)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error","message":"primary overloaded"}}`)
+	}))
+	defer primary.Close()
+
+	var gotFallbackKey string
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotFallbackKey = r.Header.Get("x-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"msg_fb_1","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":30,"output_tokens":15}}`)
+	}))
+	defer fallback.Close()
+
+	eventCh := make(chan ProxyEvent, 1)
+	cfg := config.Default()
+	cfg.UpstreamURL = primary.URL
+	cfg.FallbackUpstream = fallback.URL
+	cfg.FallbackAPIKey = "sk-ant-backup-key"
+	cfg.MaxRetries = 2
+
+	srv, err := NewServer(cfg, WithOnComplete(func(ev ProxyEvent) {
+		eventCh <- ev
+	}))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	proxySrv := httptest.NewServer(srv.ServeMux())
+	defer proxySrv.Close()
+
+	req, _ := http.NewRequest(
+		http.MethodPost,
+		proxySrv.URL+"/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-primary-key")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200 from fallback", resp.StatusCode)
+	}
+	if gotFallbackKey != "sk-ant-backup-key" {
+		t.Errorf("fallback x-api-key = %q, want sk-ant-backup-key", gotFallbackKey)
+	}
+
+	select {
+	case ev := <-eventCh:
+		if !ev.FailoverUsed || ev.RetryCount != 1 {
+			t.Errorf("telemetry failover/retry = (%v, %d), want (true, 1)", ev.FailoverUsed, ev.RetryCount)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for failover telemetry")
+	}
+}
+
+func TestRetryExhaustedReturns429Verbatim(t *testing.T) {
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"still limited"}}`)
+	}))
+	defer upstream.Close()
+
+	eventCh := make(chan ProxyEvent, 1)
+	cfg := config.Default()
+	cfg.UpstreamURL = upstream.URL
+	cfg.MaxRetries = 2
+	cfg.RetryBaseDelay = 5 * time.Millisecond
+
+	srv, err := NewServer(cfg, WithOnComplete(func(ev ProxyEvent) {
+		eventCh <- ev
+	}))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	proxySrv := httptest.NewServer(srv.ServeMux())
+	defer proxySrv.Close()
+
+	resp, err := http.Post(
+		proxySrv.URL+"/v1/messages",
+		"application/json",
+		strings.NewReader(`{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`),
+	)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d, want 429", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "still limited") {
+		t.Errorf("body = %q, want verbatim 429 error", string(body))
+	}
+	if attempts.Load() != 3 {
+		t.Errorf("attempts = %d, want 3 (1 initial + 2 retries)", attempts.Load())
+	}
+
+	select {
+	case ev := <-eventCh:
+		if ev.RetryCount != 2 || ev.StatusCode != 429 {
+			t.Errorf("telemetry = (retries=%d, status=%d), want (2, 429)", ev.RetryCount, ev.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for exhausted retry telemetry")
 	}
 }

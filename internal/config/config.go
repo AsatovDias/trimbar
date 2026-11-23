@@ -8,15 +8,19 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
-	DefaultHost        = "127.0.0.1"
-	DefaultPort        = 8787
-	DefaultUpstreamURL = "https://api.anthropic.com"
-	DefaultDataDirName = ".trimbar"
-	DefaultDBFileName  = "trimbar.db"
-	DefaultConfigFile  = "config.toml"
+	DefaultHost           = "127.0.0.1"
+	DefaultPort           = 8787
+	DefaultUpstreamURL    = "https://api.anthropic.com"
+	DefaultDataDirName    = ".trimbar"
+	DefaultDBFileName     = "trimbar.db"
+	DefaultConfigFile     = "config.toml"
+	DefaultMaxRetries     = 2
+	DefaultRetryBaseDelay = 1 * time.Second
+	DefaultMaxRetryAfter  = 5 * time.Second
 )
 
 // ModelPricing defines Anthropic API USD pricing per 1 million tokens.
@@ -30,13 +34,18 @@ type ModelPricing struct {
 
 // Config holds runtime settings and the Anthropic pricing table for Trimbar.
 type Config struct {
-	Host        string
-	Port        int
-	UpstreamURL string
-	DataDir     string
-	DBPath      string
-	TrimEnabled bool
-	Pricing     map[string]ModelPricing
+	Host             string
+	Port             int
+	UpstreamURL      string
+	FallbackUpstream string
+	FallbackAPIKey   string
+	MaxRetries       int
+	RetryBaseDelay   time.Duration
+	MaxRetryAfter    time.Duration
+	DataDir          string
+	DBPath           string
+	TrimEnabled      bool
+	Pricing          map[string]ModelPricing
 }
 
 // DefaultPricingTable returns Anthropic's USD per-1M-token pricing table.
@@ -147,12 +156,15 @@ func DefaultPricingTable() map[string]ModelPricing {
 func Default() *Config {
 	dataDir := defaultDataDir()
 	return &Config{
-		Host:        DefaultHost,
-		Port:        DefaultPort,
-		UpstreamURL: DefaultUpstreamURL,
-		DataDir:     dataDir,
-		DBPath:      filepath.Join(dataDir, DefaultDBFileName),
-		Pricing:     DefaultPricingTable(),
+		Host:           DefaultHost,
+		Port:           DefaultPort,
+		UpstreamURL:    DefaultUpstreamURL,
+		MaxRetries:     DefaultMaxRetries,
+		RetryBaseDelay: DefaultRetryBaseDelay,
+		MaxRetryAfter:  DefaultMaxRetryAfter,
+		DataDir:        dataDir,
+		DBPath:         filepath.Join(dataDir, DefaultDBFileName),
+		Pricing:        DefaultPricingTable(),
 	}
 }
 
@@ -183,6 +195,19 @@ func Load() (*Config, error) {
 	}
 	if upstream := strings.TrimSpace(os.Getenv("TRIMBAR_UPSTREAM_URL")); upstream != "" {
 		cfg.UpstreamURL = strings.TrimRight(upstream, "/")
+	}
+	if fb := strings.TrimSpace(os.Getenv("TRIMBAR_FALLBACK_UPSTREAM")); fb != "" {
+		cfg.FallbackUpstream = strings.TrimRight(fb, "/")
+	}
+	if fbKey := strings.TrimSpace(os.Getenv("TRIMBAR_FALLBACK_API_KEY")); fbKey != "" {
+		cfg.FallbackAPIKey = fbKey
+	}
+	if retriesStr := strings.TrimSpace(os.Getenv("TRIMBAR_MAX_RETRIES")); retriesStr != "" {
+		n, err := strconv.Atoi(retriesStr)
+		if err != nil || n < 0 || n > 10 {
+			return nil, fmt.Errorf("invalid TRIMBAR_MAX_RETRIES %q", retriesStr)
+		}
+		cfg.MaxRetries = n
 	}
 	if trimEnv := strings.TrimSpace(os.Getenv("TRIMBAR_TRIM_ENABLED")); trimEnv != "" {
 		b, err := strconv.ParseBool(trimEnv)
@@ -302,6 +327,20 @@ func (c *Config) loadTOMLFile(path string) error {
 			if val != "" {
 				c.UpstreamURL = strings.TrimRight(val, "/")
 			}
+		case "fallback_upstream":
+			if val != "" {
+				c.FallbackUpstream = strings.TrimRight(val, "/")
+			}
+		case "fallback_api_key":
+			if val != "" {
+				c.FallbackAPIKey = val
+			}
+		case "max_retries":
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 0 || n > 10 {
+				return fmt.Errorf("%s:%d: invalid max_retries %q", path, lineNum, val)
+			}
+			c.MaxRetries = n
 		case "db_path":
 			if val != "" {
 				c.DBPath = val

@@ -14,55 +14,58 @@ import (
 
 // RequestLog represents a single persisted Anthropic proxy request record.
 type RequestLog struct {
-	ID          int64
-	Timestamp   time.Time
-	SessionID   string
-	RequestID   string
-	Method      string
-	Path        string
-	StatusCode  int
-	Model       string
-	AgentRole   string
-	IsStreaming bool
+	ID          int64     `json:"id"`
+	Timestamp   time.Time `json:"timestamp"`
+	SessionID   string    `json:"session_id"`
+	RequestID   string    `json:"request_id"`
+	Method      string    `json:"method"`
+	Path        string    `json:"path"`
+	StatusCode  int       `json:"status_code"`
+	Model       string    `json:"model"`
+	AgentRole   string    `json:"agent_role"`
+	IsStreaming bool      `json:"is_streaming"`
 
-	GitRepo   string
-	GitBranch string
-	CWD       string
+	GitRepo   string `json:"git_repo"`
+	GitBranch string `json:"git_branch"`
+	CWD       string `json:"cwd"`
 
-	InputTokens         int64
-	OutputTokens        int64
-	CacheCreationTokens int64
-	CacheReadTokens     int64
+	InputTokens         int64 `json:"input_tokens"`
+	OutputTokens        int64 `json:"output_tokens"`
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+	CacheReadTokens     int64 `json:"cache_read_tokens"`
 
-	CostUSD            float64
-	CacheSavingsUSD    float64
-	NetCacheSavingsUSD float64
-	ShadowSavingsUSD   float64
+	CostUSD            float64 `json:"cost_usd"`
+	CacheSavingsUSD    float64 `json:"cache_savings_usd"`
+	NetCacheSavingsUSD float64 `json:"net_cache_savings_usd"`
+	ShadowSavingsUSD   float64 `json:"shadow_savings_usd"`
 
-	LatencyMS int64
-	TTFBMS    int64
+	LatencyMS int64 `json:"latency_ms"`
+	TTFBMS    int64 `json:"ttfb_ms"`
 
-	CacheBreakpoints int
-	CacheMissAnomaly bool
-	CacheMissReason  string
+	CacheBreakpoints int    `json:"cache_breakpoints"`
+	CacheMissAnomaly bool   `json:"cache_miss_anomaly"`
+	CacheMissReason  string `json:"cache_miss_reason"`
 
-	SystemEstTokens      int
-	ToolsEstTokens       int
-	MessagesEstTokens    int
-	ToolResultsEstTokens int
+	SystemEstTokens      int `json:"system_est_tokens"`
+	ToolsEstTokens       int `json:"tools_est_tokens"`
+	MessagesEstTokens    int `json:"messages_est_tokens"`
+	ToolResultsEstTokens int `json:"tool_results_est_tokens"`
 
-	DuplicateReadCount        int
-	DuplicateReadWastedTokens int
-	DuplicateReads            []anthropic.DuplicateRead
+	DuplicateReadCount        int                       `json:"duplicate_read_count"`
+	DuplicateReadWastedTokens int                       `json:"duplicate_read_wasted_tokens"`
+	DuplicateReads            []anthropic.DuplicateRead `json:"duplicate_reads,omitempty"`
 
-	ANSISequenceCount int
-	ANSIWastedTokens  int
-	TotalWastedTokens int
+	ANSISequenceCount int `json:"ansi_sequence_count"`
+	ANSIWastedTokens  int `json:"ansi_wasted_tokens"`
+	TotalWastedTokens int `json:"total_wasted_tokens"`
 
-	TrimmedTokens     int
-	TrimmedSavingsUSD float64
+	TrimmedTokens     int     `json:"trimmed_tokens"`
+	TrimmedSavingsUSD float64 `json:"trimmed_savings_usd"`
 
-	ErrorBody string
+	RetryCount   int  `json:"retry_count"`
+	FailoverUsed bool `json:"failover_used"`
+
+	ErrorBody string `json:"error_body,omitempty"`
 }
 
 // TotalInputTokens returns uncached + cache creation + cache read tokens.
@@ -135,6 +138,8 @@ type StatsSummary struct {
 	TotalWastedTokens         int64             `json:"total_wasted_tokens"`
 	TotalTrimmedTokens        int64             `json:"total_trimmed_tokens"`
 	TotalTrimmedSavingsUSD    float64           `json:"total_trimmed_savings_usd"`
+	TotalRetries              int64             `json:"total_retries"`
+	TotalFailovers            int64             `json:"total_failovers"`
 	ByModel                   []ModelStats      `json:"by_model"`
 	ByRepoBranch              []RepoBranchStats `json:"by_repo_branch"`
 }
@@ -212,6 +217,7 @@ INSERT INTO requests (
 	duplicate_read_count, duplicate_read_wasted_tokens, duplicate_reads_json,
 	ansi_sequence_count, ansi_wasted_tokens, total_wasted_tokens,
 	trimmed_tokens, trimmed_savings_usd,
+	retry_count, failover_used,
 	error_body
 ) VALUES (
 	?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -223,6 +229,7 @@ INSERT INTO requests (
 	?, ?, ?, ?,
 	?, ?, ?,
 	?, ?, ?,
+	?, ?,
 	?, ?,
 	?
 );`
@@ -265,6 +272,8 @@ INSERT INTO requests (
 		rec.TotalWastedTokens,
 		rec.TrimmedTokens,
 		rec.TrimmedSavingsUSD,
+		rec.RetryCount,
+		boolToInt(rec.FailoverUsed),
 		rec.ErrorBody,
 	)
 	if err != nil {
@@ -336,7 +345,9 @@ SELECT
 	COALESCE(SUM(ansi_wasted_tokens), 0),
 	COALESCE(SUM(total_wasted_tokens), 0),
 	COALESCE(SUM(trimmed_tokens), 0),
-	COALESCE(SUM(trimmed_savings_usd), 0)
+	COALESCE(SUM(trimmed_savings_usd), 0),
+	COALESCE(SUM(retry_count), 0),
+	COALESCE(SUM(CASE WHEN failover_used = 1 THEN 1 ELSE 0 END), 0)
 FROM requests %s;`, where)
 
 	if err := r.db.sqlDB.QueryRowContext(ctx, aggQ, args...).Scan(
@@ -360,6 +371,8 @@ FROM requests %s;`, where)
 		&summary.TotalWastedTokens,
 		&summary.TotalTrimmedTokens,
 		&summary.TotalTrimmedSavingsUSD,
+		&summary.TotalRetries,
+		&summary.TotalFailovers,
 	); err != nil {
 		return nil, fmt.Errorf("query stats aggregate: %w", err)
 	}
@@ -485,6 +498,7 @@ SELECT
 	duplicate_read_count, duplicate_read_wasted_tokens, duplicate_reads_json,
 	ansi_sequence_count, ansi_wasted_tokens, total_wasted_tokens,
 	trimmed_tokens, trimmed_savings_usd,
+	retry_count, failover_used,
 	error_body
 FROM requests %s
 ORDER BY id DESC
@@ -505,6 +519,7 @@ LIMIT ?;`, where)
 			tsStr       string
 			isStreamInt int
 			anomalyInt  int
+			failoverInt int
 			dupJSON     string
 		)
 		if err := rows.Scan(
@@ -519,6 +534,7 @@ LIMIT ?;`, where)
 			&rec.DuplicateReadCount, &rec.DuplicateReadWastedTokens, &dupJSON,
 			&rec.ANSISequenceCount, &rec.ANSIWastedTokens, &rec.TotalWastedTokens,
 			&rec.TrimmedTokens, &rec.TrimmedSavingsUSD,
+			&rec.RetryCount, &failoverInt,
 			&rec.ErrorBody,
 		); err != nil {
 			return nil, err
@@ -529,6 +545,7 @@ LIMIT ?;`, where)
 		}
 		rec.IsStreaming = isStreamInt == 1
 		rec.CacheMissAnomaly = anomalyInt == 1
+		rec.FailoverUsed = failoverInt == 1
 		if dupJSON != "" && dupJSON != "[]" {
 			_ = json.Unmarshal([]byte(dupJSON), &rec.DuplicateReads)
 		}

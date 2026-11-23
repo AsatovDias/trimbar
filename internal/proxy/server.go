@@ -31,6 +31,12 @@ func NewServer(cfg *config.Config, opts ...HandlerOption) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_trimbar/health", handleHealth)
+	if h.uiHandler != nil {
+		mux.Handle("/ui", h.uiHandler)
+		mux.Handle("/ui/", h.uiHandler)
+		mux.Handle("/api/stats", h.uiHandler)
+		mux.Handle("/api/inspect", h.uiHandler)
+	}
 	mux.Handle("/", h)
 
 	srv := &http.Server{

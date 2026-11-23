@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS requests (
 
 	trimmed_tokens INTEGER NOT NULL DEFAULT 0,
 	trimmed_savings_usd REAL NOT NULL DEFAULT 0,
+
+	retry_count INTEGER NOT NULL DEFAULT 0,
+	failover_used INTEGER NOT NULL DEFAULT 0,
 
 	error_body TEXT NOT NULL DEFAULT ''
 );
@@ -184,11 +187,17 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("apply schema migration: %w", err)
 	}
 
-	// Safe backwards-compatible v2 column migrations for existing v1 SQLite databases.
+	// Safe backwards-compatible v2 & v3 column migrations for existing SQLite databases.
 	if err := ensureColumn(ctx, tx, "requests", "trimmed_tokens", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, tx, "requests", "trimmed_savings_usd", "REAL NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "requests", "retry_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "requests", "failover_used", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
