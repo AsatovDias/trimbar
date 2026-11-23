@@ -1,0 +1,33 @@
+# Binaries
+/trimbar
+/trimbar.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Test & coverage outputs
+*.test
+*.out
+coverage.txt
+
+# SQLite databases & WAL files
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Environment & secrets
+.env
+.env.*
+*.local
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
