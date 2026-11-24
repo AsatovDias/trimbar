@@ -366,3 +366,64 @@ func TestDetectCacheMissAnomaly(t *testing.T) {
 		t.Errorf("HitRatioDrop = %.2f, want >= 0.80", anomaly.HitRatioDrop)
 	}
 }
+
+func TestInspectPostCacheToolBytes(t *testing.T) {
+	frozenContent := strings.Repeat("A", 500)
+	postCacheContent := strings.Repeat("B", 320)
+
+	// Case 1: Inline cache_control inside messages
+	inlinePayload, _ := json.Marshal(map[string]any{
+		"model":      "claude-sonnet-4-20250514",
+		"max_tokens": 4096,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_1", "content": frozenContent, "cache_control": map[string]string{"type": "ephemeral"}},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_2", "content": postCacheContent},
+				},
+			},
+		},
+	})
+	res, err := InspectRequest(inlinePayload)
+	if err != nil {
+		t.Fatalf("InspectRequest(inline) error = %v", err)
+	}
+	if res.PostCacheToolBytes != len(postCacheContent) {
+		t.Errorf("inline PostCacheToolBytes = %d, want %d", res.PostCacheToolBytes, len(postCacheContent))
+	}
+
+	// Case 2: Top-level automatic caching (root cache_control)
+	autoPayload, _ := json.Marshal(map[string]any{
+		"model":         "claude-sonnet-4-20250514",
+		"max_tokens":    4096,
+		"cache_control": map[string]string{"type": "ephemeral"},
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_early", "content": frozenContent},
+				},
+			},
+			{"role": "assistant", "content": "checking next tool"},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_curr", "content": postCacheContent},
+				},
+			},
+		},
+	})
+	autoRes, err := InspectRequest(autoPayload)
+	if err != nil {
+		t.Fatalf("InspectRequest(auto) error = %v", err)
+	}
+	if autoRes.PostCacheToolBytes != len(postCacheContent) {
+		t.Errorf("top-level auto PostCacheToolBytes = %d, want %d", autoRes.PostCacheToolBytes, len(postCacheContent))
+	}
+}

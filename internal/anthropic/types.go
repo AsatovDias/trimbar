@@ -14,13 +14,14 @@ type CacheControl struct {
 
 // MessageRequest models the relevant fields of POST /v1/messages.
 type MessageRequest struct {
-	Model     string           `json:"model"`
-	MaxTokens int              `json:"max_tokens"`
-	Stream    bool             `json:"stream"`
-	System    SystemPrompt     `json:"system,omitempty"`
-	Tools     []ToolDefinition `json:"tools,omitempty"`
-	Messages  []Message        `json:"messages,omitempty"`
-	Metadata  map[string]any   `json:"metadata,omitempty"`
+	Model        string           `json:"model"`
+	MaxTokens    int              `json:"max_tokens"`
+	Stream       bool             `json:"stream"`
+	CacheControl *CacheControl    `json:"cache_control,omitempty"`
+	System       SystemPrompt     `json:"system,omitempty"`
+	Tools        []ToolDefinition `json:"tools,omitempty"`
+	Messages     []Message        `json:"messages,omitempty"`
+	Metadata     map[string]any   `json:"metadata,omitempty"`
 }
 
 // SystemPrompt supports both Anthropic string form ("You are...") and block array form.

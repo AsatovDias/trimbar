@@ -20,9 +20,10 @@ const MinOriginalReadChars = 200
 type TrimResult struct {
 	Body              []byte   // Trimmed JSON payload (or original bytes untouched if Modified == false)
 	Modified          bool     // True only when at least one post-cache_control block was changed
-	FrozenMessageIdx  int      // Index of the last message containing cache_control (-1 if none in messages)
-	FrozenBlockIdx    int      // Index of the last block containing cache_control within FrozenMessageIdx (-1 if none)
-	TrimmedBytes      int      // Exact byte reduction achieved across modified blocks
+	FrozenMessageIdx   int      // Index of the last message containing cache_control (-1 if none in messages)
+	FrozenBlockIdx     int      // Index of the last block containing cache_control within FrozenMessageIdx (-1 if none)
+	PostCacheToolBytes int      // Total tool_result content bytes strictly after the last cache_control boundary
+	TrimmedBytes       int      // Exact byte reduction achieved across modified blocks
 	TrimmedTokens     int      // Estimated tokens saved (approx. TrimmedBytes / 4)
 	ANSIStrippedCount int      // Number of ANSI escape sequences removed
 	ANSIBytesSaved    int      // Bytes removed by ANSI stripping
@@ -194,6 +195,12 @@ func TrimRequest(body []byte) (TrimResult, error) {
 				// Frozen prefix protection: NEVER mutate anything at or before cache_control!
 				if !isAfterFrozen || !hasResultContent {
 					continue
+				}
+
+				if txt, ok := extractToolResultText(rawResultContent); ok && len(txt) > 0 {
+					res.PostCacheToolBytes += len(txt)
+				} else {
+					res.PostCacheToolBytes += len(bytes.TrimSpace(rawResultContent))
 				}
 
 				var (

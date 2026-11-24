@@ -74,6 +74,7 @@ type InspectionResult struct {
 	CacheBreakpoints      int
 	CacheControlLocations []string
 	HasPromptCaching      bool
+	PostCacheToolBytes    int // Exact tool_result bytes strictly after the last cache_control boundary
 
 	DuplicateReads              []DuplicateRead
 	DuplicateReadRedundantCalls int
@@ -142,7 +143,10 @@ func InspectParsedRequest(req *MessageRequest) *InspectionResult {
 		}
 	}
 
-	// 1. Inspect system prompt
+	// 1. Inspect top-level automatic cache_control and system prompt
+	if req.CacheControl != nil && req.CacheControl.Type != "" {
+		recordCache("top_level")
+	}
 	for _, b := range req.System.Blocks {
 		res.SystemBytes += len(b.Text)
 		if b.CacheControl != nil && b.CacheControl.Type != "" {
@@ -160,13 +164,17 @@ func InspectParsedRequest(req *MessageRequest) *InspectionResult {
 	}
 	res.ToolsEstTokens = estimateTokens(res.ToolsBytes)
 
+	// Compute the exact frozen cache_control boundary so we can measure real
+	// post-cache tool_result bytes eligible for trimming even in Shadow Mode.
+	frozenMsgIdx, frozenBlockIdx := findFrozenMessageBoundary(req)
+
 	// 3. Index tool_result payloads by tool_use_id for accurate waste attribution,
 	//    collect file paths from tool_use calls for gitmeta fallback,
-	//    and inspect ANSI escape noise + message sizes.
+	//    measure post_cache_tool_bytes, and inspect ANSI escape noise + message sizes.
 	toolResultBytesByID := make(map[string]int)
 	toolPathSeen := make(map[string]bool)
-	for _, msg := range req.Messages {
-		for _, block := range msg.Content.Blocks {
+	for msgIdx, msg := range req.Messages {
+		for blockIdx, block := range msg.Content.Blocks {
 			if block.CacheControl != nil && block.CacheControl.Type != "" {
 				recordCache("messages")
 			}
@@ -188,6 +196,9 @@ func InspectParsedRequest(req *MessageRequest) *InspectionResult {
 				resultLen := block.Content.ByteLen()
 				res.MessagesBytes += resultLen
 				res.ToolResultsBytes += resultLen
+				if isAfterFrozenBoundary(msgIdx, blockIdx, frozenMsgIdx, frozenBlockIdx) {
+					res.PostCacheToolBytes += resultLen
+				}
 				if block.ToolUseID != "" {
 					toolResultBytesByID[block.ToolUseID] += resultLen
 				}
@@ -484,4 +495,51 @@ func estimateTokensMin1(byteLen int) int {
 		return 1
 	}
 	return t
+}
+
+const freezeWholeMsg = int(^uint(0) >> 1)
+
+// findFrozenMessageBoundary mirrors internal/trimmer's frozen prefix calculation
+// (inline cache_control markers + top-level automatic cache_control).
+func findFrozenMessageBoundary(req *MessageRequest) (int, int) {
+	if req == nil || len(req.Messages) == 0 {
+		return -1, -1
+	}
+	lastMsg := -1
+	lastBlock := -1
+	for i, msg := range req.Messages {
+		for j, b := range msg.Content.Blocks {
+			if b.CacheControl != nil && b.CacheControl.Type != "" {
+				lastMsg = i
+				lastBlock = j
+			}
+		}
+	}
+
+	if req.CacheControl != nil && req.CacheControl.Type != "" {
+		autoMsg := len(req.Messages) - 1
+		if strings.EqualFold(strings.TrimSpace(req.Messages[len(req.Messages)-1].Role), "user") {
+			autoMsg = len(req.Messages) - 2
+		}
+		if autoMsg > lastMsg {
+			lastMsg = autoMsg
+			lastBlock = freezeWholeMsg
+		} else if autoMsg == lastMsg && autoMsg >= 0 {
+			lastBlock = freezeWholeMsg
+		}
+	}
+	return lastMsg, lastBlock
+}
+
+func isAfterFrozenBoundary(msgIdx, blockIdx, frozenMsgIdx, frozenBlockIdx int) bool {
+	if frozenMsgIdx < 0 {
+		return true
+	}
+	if msgIdx > frozenMsgIdx {
+		return true
+	}
+	if msgIdx == frozenMsgIdx && blockIdx > frozenBlockIdx {
+		return true
+	}
+	return false
 }

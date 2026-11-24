@@ -60,8 +60,9 @@ type RequestLog struct {
 	ANSIWastedTokens  int `json:"ansi_wasted_tokens"`
 	TotalWastedTokens int `json:"total_wasted_tokens"`
 
-	TrimmedTokens     int     `json:"trimmed_tokens"`
-	TrimmedSavingsUSD float64 `json:"trimmed_savings_usd"`
+	TrimmedTokens      int     `json:"trimmed_tokens"`
+	TrimmedSavingsUSD  float64 `json:"trimmed_savings_usd"`
+	PostCacheToolBytes int     `json:"post_cache_tool_bytes"`
 
 	RetryCount   int  `json:"retry_count"`
 	FailoverUsed bool `json:"failover_used"`
@@ -142,6 +143,7 @@ type StatsSummary struct {
 	TotalWastedTokens         int64             `json:"total_wasted_tokens"`
 	TotalTrimmedTokens        int64             `json:"total_trimmed_tokens"`
 	TotalTrimmedSavingsUSD    float64           `json:"total_trimmed_savings_usd"`
+	TotalPostCacheToolBytes   int64             `json:"total_post_cache_tool_bytes"`
 	TotalRetries              int64             `json:"total_retries"`
 	TotalFailovers            int64             `json:"total_failovers"`
 	ByModel                   []ModelStats      `json:"by_model"`
@@ -175,6 +177,7 @@ type InspectReport struct {
 	TotalANSIWasted         int64                  `json:"total_ansi_wasted_tokens"`
 	TotalTrimmedTokens      int64                  `json:"total_trimmed_tokens"`
 	TotalTrimmedSavingsUSD  float64                `json:"total_trimmed_savings_usd"`
+	TotalPostCacheToolBytes int64                  `json:"total_post_cache_tool_bytes"`
 }
 
 // Repository provides persistence and analytical queries over the SQLite requests table.
@@ -220,7 +223,7 @@ INSERT INTO requests (
 	system_est_tokens, tools_est_tokens, messages_est_tokens, tool_results_est_tokens,
 	duplicate_read_count, duplicate_read_wasted_tokens, duplicate_reads_json,
 	ansi_sequence_count, ansi_wasted_tokens, total_wasted_tokens,
-	trimmed_tokens, trimmed_savings_usd,
+	trimmed_tokens, trimmed_savings_usd, post_cache_tool_bytes,
 	retry_count, failover_used,
 	error_body
 ) VALUES (
@@ -233,7 +236,7 @@ INSERT INTO requests (
 	?, ?, ?, ?,
 	?, ?, ?,
 	?, ?, ?,
-	?, ?,
+	?, ?, ?,
 	?, ?,
 	?
 );`
@@ -277,6 +280,7 @@ INSERT INTO requests (
 		rec.TotalWastedTokens,
 		rec.TrimmedTokens,
 		rec.TrimmedSavingsUSD,
+		rec.PostCacheToolBytes,
 		rec.RetryCount,
 		boolToInt(rec.FailoverUsed),
 		rec.ErrorBody,
@@ -352,6 +356,7 @@ SELECT
 	COALESCE(SUM(total_wasted_tokens), 0),
 	COALESCE(SUM(trimmed_tokens), 0),
 	COALESCE(SUM(trimmed_savings_usd), 0),
+	COALESCE(SUM(post_cache_tool_bytes), 0),
 	COALESCE(SUM(retry_count), 0),
 	COALESCE(SUM(CASE WHEN failover_used = 1 THEN 1 ELSE 0 END), 0)
 FROM requests %s;`, where)
@@ -379,6 +384,7 @@ FROM requests %s;`, where)
 		&summary.TotalWastedTokens,
 		&summary.TotalTrimmedTokens,
 		&summary.TotalTrimmedSavingsUSD,
+		&summary.TotalPostCacheToolBytes,
 		&summary.TotalRetries,
 		&summary.TotalFailovers,
 	); err != nil {
@@ -514,7 +520,7 @@ SELECT
 	system_est_tokens, tools_est_tokens, messages_est_tokens, tool_results_est_tokens,
 	duplicate_read_count, duplicate_read_wasted_tokens, duplicate_reads_json,
 	ansi_sequence_count, ansi_wasted_tokens, total_wasted_tokens,
-	trimmed_tokens, trimmed_savings_usd,
+	trimmed_tokens, trimmed_savings_usd, post_cache_tool_bytes,
 	retry_count, failover_used,
 	error_body
 FROM requests %s
@@ -551,7 +557,7 @@ LIMIT ?;`, where)
 			&rec.SystemEstTokens, &rec.ToolsEstTokens, &rec.MessagesEstTokens, &rec.ToolResultsEstTokens,
 			&rec.DuplicateReadCount, &rec.DuplicateReadWastedTokens, &dupJSON,
 			&rec.ANSISequenceCount, &rec.ANSIWastedTokens, &rec.TotalWastedTokens,
-			&rec.TrimmedTokens, &rec.TrimmedSavingsUSD,
+			&rec.TrimmedTokens, &rec.TrimmedSavingsUSD, &rec.PostCacheToolBytes,
 			&rec.RetryCount, &failoverInt,
 			&rec.ErrorBody,
 		); err != nil {
@@ -578,6 +584,7 @@ LIMIT ?;`, where)
 		report.TotalANSIWasted += int64(rec.ANSIWastedTokens)
 		report.TotalTrimmedTokens += int64(rec.TrimmedTokens)
 		report.TotalTrimmedSavingsUSD += rec.TrimmedSavingsUSD
+		report.TotalPostCacheToolBytes += int64(rec.PostCacheToolBytes)
 
 		// Context composition (aggregate across inspected turns)
 		report.Context.SystemTokens += int64(rec.SystemEstTokens)

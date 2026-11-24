@@ -69,6 +69,9 @@ func TestFrozenPrefixUntouched(t *testing.T) {
 	if res.TrimmedBytes != 0 || res.TrimmedTokens != 0 {
 		t.Errorf("expected 0 trimmed bytes/tokens, got (%d, %d)", res.TrimmedBytes, res.TrimmedTokens)
 	}
+	if res.PostCacheToolBytes != 0 {
+		t.Errorf("expected PostCacheToolBytes=0 when all tool_results are inside frozen prefix, got %d", res.PostCacheToolBytes)
+	}
 	if res.FrozenMessageIdx != 4 || res.FrozenBlockIdx != 1 {
 		t.Errorf("Frozen boundary = (%d, %d), want (4, 1)", res.FrozenMessageIdx, res.FrozenBlockIdx)
 	}
@@ -497,6 +500,10 @@ func TestTopLevelAutomaticCachePreserved(t *testing.T) {
 	}
 	if res.ANSIStrippedCount != 2 {
 		t.Errorf("ANSIStrippedCount = %d, want 2 (only current turn)", res.ANSIStrippedCount)
+	}
+	wantPostCacheBytes := len(fileBody) + len(currentANSI)
+	if res.PostCacheToolBytes != wantPostCacheBytes {
+		t.Errorf("PostCacheToolBytes = %d, want %d", res.PostCacheToolBytes, wantPostCacheBytes)
 	}
 
 	var newTop map[string]json.RawMessage

@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS requests (
 
 	trimmed_tokens INTEGER NOT NULL DEFAULT 0,
 	trimmed_savings_usd REAL NOT NULL DEFAULT 0,
+	post_cache_tool_bytes INTEGER NOT NULL DEFAULT 0,
 
 	retry_count INTEGER NOT NULL DEFAULT 0,
 	failover_used INTEGER NOT NULL DEFAULT 0,
@@ -202,6 +203,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumn(ctx, tx, "requests", "cost_estimated", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "requests", "post_cache_tool_bytes", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 

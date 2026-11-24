@@ -26,7 +26,7 @@ import (
 	"github.com/AsatovDias/trimbar/internal/webui"
 )
 
-var version = "0.4.2"
+var version = "0.4.3"
 
 // Lipgloss styles for terminal output.
 var (
@@ -422,6 +422,7 @@ func buildRequestLog(ev proxy.ProxyEvent, resolver *gitmeta.Resolver, repo *stor
 		rec.ANSISequenceCount = insp.ANSI.SequenceCount
 		rec.ANSIWastedTokens = insp.ANSI.EstTokens
 		rec.TotalWastedTokens = insp.TotalWastedEstTokens
+		rec.PostCacheToolBytes = insp.PostCacheToolBytes
 
 		if resolver != nil {
 			attr := resolver.Resolve(insp)
@@ -636,6 +637,10 @@ func renderStats(s *storage.StatsSummary, window string) {
 		styleOK.Render(formatTokens(s.TotalTrimmedTokens)+" tokens"),
 		styleOK.Render(fmt.Sprintf("$%.4f USD saved", s.TotalTrimmedSavingsUSD)),
 	)
+	fmt.Printf("  Post-Cache Tool Surface:         %s (~%s est. tokens after cache_control)\n",
+		formatBytes(s.TotalPostCacheToolBytes),
+		formatTokens(s.TotalPostCacheToolBytes/4),
+	)
 	if s.TotalRetries > 0 || s.TotalFailovers > 0 {
 		fmt.Printf("  Resilience (Retries / Failover): %d retries · %d failovers\n",
 			s.TotalRetries, s.TotalFailovers)
@@ -743,13 +748,20 @@ func renderInspect(rep *storage.InspectReport) {
 		fmt.Println()
 	}
 
-	// 4. Active Trimming & ANSI Overhead
-	if rep.TotalTrimmedTokens > 0 {
-		fmt.Println(styleTitle.Render("ACTIVE TRIMMING (CACHE-SAFE)"))
-		fmt.Printf("  %s tokens trimmed after cache_control boundary (%s actual USD saved)\n\n",
-			styleOK.Render(formatTokens(rep.TotalTrimmedTokens)),
-			styleOK.Render(fmt.Sprintf("$%.4f", rep.TotalTrimmedSavingsUSD)),
+	// 4. Active Trimming, Post-Cache Surface & ANSI Overhead
+	if rep.TotalTrimmedTokens > 0 || rep.TotalPostCacheToolBytes > 0 {
+		fmt.Println(styleTitle.Render("POST-CACHE TRIMMING SURFACE"))
+		fmt.Printf("  Post-cache tool_result bytes: %s (~%s est. tokens after cache_control)\n",
+			formatBytes(rep.TotalPostCacheToolBytes),
+			formatTokens(rep.TotalPostCacheToolBytes/4),
 		)
+		if rep.TotalTrimmedTokens > 0 {
+			fmt.Printf("  Actively trimmed:             %s tokens (%s actual USD saved)\n",
+				styleOK.Render(formatTokens(rep.TotalTrimmedTokens)),
+				styleOK.Render(fmt.Sprintf("$%.4f", rep.TotalTrimmedSavingsUSD)),
+			)
+		}
+		fmt.Println()
 	}
 	if rep.TotalANSISequences > 0 {
 		fmt.Println(styleTitle.Render("ANSI ESCAPE POLLUTION"))
@@ -844,6 +856,17 @@ func formatTokens(n int64) string {
 		return fmt.Sprintf("%.1fk", float64(n)/1_000.0)
 	default:
 		return fmt.Sprintf("%d", n)
+	}
+}
+
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1024*1024:
+		return fmt.Sprintf("%.2f MB", float64(n)/(1024.0*1024.0))
+	case n >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024.0)
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
 }
 
