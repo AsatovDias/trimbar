@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http/httptest"
 	"os"
 	"os/signal"
@@ -24,7 +26,7 @@ import (
 	"github.com/trimbar/trimbar/internal/webui"
 )
 
-var version = "0.4.0"
+var version = "0.4.1"
 
 // Lipgloss styles for terminal output.
 var (
@@ -169,11 +171,7 @@ func newStartCmd() *cobra.Command {
 
 			onComplete := func(ev proxy.ProxyEvent) {
 				rec := buildRequestLog(ev, resolver, repo)
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				if _, err := repo.InsertRequest(ctx, rec); err != nil {
-					fmt.Fprintf(os.Stderr, "%s failed to persist request: %v\n", styleWarn.Render("WARN"), err)
-				}
+				persistRequestLog(repo, rec, os.Stderr)
 				printLiveEvent(rec)
 			}
 
@@ -224,6 +222,9 @@ func newStartCmd() *cobra.Command {
 				styleTitle.Render(usageHint),
 			}
 			fmt.Println(styleBanner.Render(strings.Join(bannerLines, "\n")))
+			if warn := nonLoopbackSecurityWarning(cfg.Host); warn != "" {
+				fmt.Fprintln(os.Stderr, warn)
+			}
 			fmt.Println(styleMuted.Render("Press Ctrl+C to stop. Streaming telemetry below..."))
 			fmt.Println()
 
@@ -782,6 +783,49 @@ func renderProgressBar(ratio float64, width int) string {
 	bar := styleOK.Render(strings.Repeat("█", filled)) +
 		styleMuted.Render(strings.Repeat("░", width-filled))
 	return bar
+}
+
+func persistRequestLog(repo *storage.Repository, rec *storage.RequestLog, errOut io.Writer) {
+	if repo == nil || rec == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := repo.InsertRequest(ctx, rec); err != nil && errOut != nil {
+		fmt.Fprintf(errOut, "%s failed to persist request to SQLite (user response unaffected): %v\n",
+			styleWarn.Render("WARN"), err)
+	}
+}
+
+// isLoopbackHost reports whether host binds strictly to a local loopback interface.
+func isLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(strings.Trim(host, "[]")))
+	if h == "" || h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// nonLoopbackSecurityWarning returns a prominent warning when Trimbar is exposed
+// on a non-loopback interface (e.g. 0.0.0.0) over plaintext HTTP.
+func nonLoopbackSecurityWarning(host string) string {
+	if isLoopbackHost(host) {
+		return ""
+	}
+	warnBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("196")).
+		Padding(0, 2)
+	msg := strings.Join([]string{
+		styleErr.Render("SECURITY WARNING: Non-loopback bind address (--host " + host + ")"),
+		"Trimbar is listening on a network-accessible interface over plaintext HTTP and",
+		"accepts sensitive Authorization / x-api-key headers plus /ui & /api/* telemetry.",
+		"Use --host 127.0.0.1 unless protected by TLS and strict firewall/VPN rules.",
+	}, "\n")
+	return warnBox.Render(msg)
 }
 
 func formatAlertCount(n int64) string {

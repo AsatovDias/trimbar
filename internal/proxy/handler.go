@@ -347,6 +347,11 @@ func (h *Handler) emit(ev ProxyEvent) {
 	if h.onComplete == nil || !shouldLogTelemetryPath(ev.Path) {
 		return
 	}
+	// Defensive guard: a failing telemetry sink (e.g. read-only SQLite) must never
+	// crash the proxy handler after the user's response has been delivered.
+	defer func() {
+		_ = recover()
+	}()
 	h.onComplete(ev)
 }
 

@@ -779,3 +779,182 @@ func TestRetryExhaustedReturns429Verbatim(t *testing.T) {
 		t.Fatalf("timed out waiting for exhausted retry telemetry")
 	}
 }
+
+// TestNoRetryAfter200OrMidStreamFailure strictly verifies that auto-retry and failover
+// ONLY trigger before response headers arrive (429/529 or dial error) and NEVER
+// duplicate a 200 OK response or an already-started SSE stream that fails mid-stream.
+func TestNoRetryAfter200OrMidStreamFailure(t *testing.T) {
+	t.Run("no retry on 200 OK SSE mid-stream error event", func(t *testing.T) {
+		var primaryHits, fallbackHits atomic.Int32
+		primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			primaryHits.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fl, _ := w.(http.Flusher)
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_mid\",\"model\":\"claude-sonnet-4-20250514\",\"usage\":{\"input_tokens\":10}}}\n\n")
+			if fl != nil {
+				fl.Flush()
+			}
+			_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded mid-stream\"}}\n\n")
+			if fl != nil {
+				fl.Flush()
+			}
+		}))
+		defer primary.Close()
+
+		fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fallbackHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer fallback.Close()
+
+		eventCh := make(chan ProxyEvent, 1)
+		cfg := config.Default()
+		cfg.UpstreamURL = primary.URL
+		cfg.FallbackUpstream = fallback.URL
+		cfg.MaxRetries = 2
+		cfg.RetryBaseDelay = 5 * time.Millisecond
+
+		srv, err := NewServer(cfg, WithOnComplete(func(ev ProxyEvent) { eventCh <- ev }))
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		proxySrv := httptest.NewServer(srv.ServeMux())
+		defer proxySrv.Close()
+
+		resp, err := http.Post(
+			proxySrv.URL+"/v1/messages",
+			"application/json",
+			strings.NewReader(`{"model":"claude-sonnet-4-20250514","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+		)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
+		}
+		if primaryHits.Load() != 1 || fallbackHits.Load() != 0 {
+			t.Errorf("hits = (primary:%d, fallback:%d), want (1, 0) — must never retry after 200 OK!",
+				primaryHits.Load(), fallbackHits.Load())
+		}
+		ev := <-eventCh
+		if ev.RetryCount != 0 || ev.FailoverUsed {
+			t.Errorf("telemetry retry/failover = (%d, %v), want (0, false)", ev.RetryCount, ev.FailoverUsed)
+		}
+	})
+
+	t.Run("no retry on abrupt mid-stream TCP drop after 200 OK", func(t *testing.T) {
+		var primaryHits, fallbackHits atomic.Int32
+		primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			primaryHits.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fl, _ := w.(http.Flusher)
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_drop\",\"model\":\"claude-sonnet-4-20250514\",\"usage\":{\"input_tokens\":10}}}\n\n")
+			if fl != nil {
+				fl.Flush()
+			}
+			// Abruptly sever the TCP connection mid-stream.
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
+		}))
+		defer primary.Close()
+
+		fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fallbackHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer fallback.Close()
+
+		eventCh := make(chan ProxyEvent, 1)
+		cfg := config.Default()
+		cfg.UpstreamURL = primary.URL
+		cfg.FallbackUpstream = fallback.URL
+		cfg.MaxRetries = 2
+		cfg.RetryBaseDelay = 5 * time.Millisecond
+
+		srv, err := NewServer(cfg, WithOnComplete(func(ev ProxyEvent) { eventCh <- ev }))
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		proxySrv := httptest.NewServer(srv.ServeMux())
+		defer proxySrv.Close()
+
+		resp, err := http.Post(
+			proxySrv.URL+"/v1/messages",
+			"application/json",
+			strings.NewReader(`{"model":"claude-sonnet-4-20250514","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+		)
+		if err == nil {
+			_, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+		}
+
+		if primaryHits.Load() != 1 || fallbackHits.Load() != 0 {
+			t.Errorf("hits = (primary:%d, fallback:%d), want (1, 0) — must never retry mid-stream drop!",
+				primaryHits.Load(), fallbackHits.Load())
+		}
+		select {
+		case ev := <-eventCh:
+			if ev.RetryCount != 0 || ev.FailoverUsed {
+				t.Errorf("telemetry retry/failover = (%d, %v), want (0, false)", ev.RetryCount, ev.FailoverUsed)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for mid-stream drop telemetry")
+		}
+	})
+
+	t.Run("failover allowed on pre-response network dial failure", func(t *testing.T) {
+		// Create and immediately close primary server so dial fails before headers.
+		deadPrimary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		deadURL := deadPrimary.URL
+		deadPrimary.Close()
+
+		var fallbackHits atomic.Int32
+		fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fallbackHits.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":"msg_dial_fb","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":10,"output_tokens":5}}`)
+		}))
+		defer fallback.Close()
+
+		eventCh := make(chan ProxyEvent, 1)
+		cfg := config.Default()
+		cfg.UpstreamURL = deadURL
+		cfg.FallbackUpstream = fallback.URL
+		cfg.MaxRetries = 2
+
+		srv, err := NewServer(cfg, WithOnComplete(func(ev ProxyEvent) { eventCh <- ev }))
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		proxySrv := httptest.NewServer(srv.ServeMux())
+		defer proxySrv.Close()
+
+		resp, err := http.Post(
+			proxySrv.URL+"/v1/messages",
+			"application/json",
+			strings.NewReader(`{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`),
+		)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK || fallbackHits.Load() != 1 {
+			t.Errorf("got status=%d fallbackHits=%d, want 200 and 1", resp.StatusCode, fallbackHits.Load())
+		}
+		ev := <-eventCh
+		if !ev.FailoverUsed || ev.RetryCount != 1 {
+			t.Errorf("telemetry failover/retry = (%v, %d), want (true, 1)", ev.FailoverUsed, ev.RetryCount)
+		}
+	})
+}

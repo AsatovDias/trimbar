@@ -91,8 +91,12 @@ func TrimRequest(body []byte) (TrimResult, error) {
 		return res, nil
 	}
 
-	// Pass 1: Locate the exact frozen prefix boundary (last cache_control in messages).
-	frozenMsgIdx, frozenBlockIdx := findFrozenBoundary(rawMessages)
+	// Pass 1: Locate the exact frozen prefix boundary.
+	// - Explicit inline cache_control markers inside messages freeze everything up to and
+	//   including the last marked block.
+	// - Top-level automatic caching (root "cache_control" field in /v1/messages) freezes
+	//   every earlier turn before the final user message of the current turn.
+	frozenMsgIdx, frozenBlockIdx := findFrozenBoundary(top, rawMessages)
 	res.FrozenMessageIdx = frozenMsgIdx
 	res.FrozenBlockIdx = frozenBlockIdx
 
@@ -360,7 +364,9 @@ func duplicateReadPlaceholder(filePath string) string {
 	return fmt.Sprintf("[Trimbar: identical content of %s already loaded earlier in context]", filePath)
 }
 
-func findFrozenBoundary(rawMessages []json.RawMessage) (int, int) {
+const freezeWholeMessage = int(^uint(0) >> 1)
+
+func findFrozenBoundary(top map[string]json.RawMessage, rawMessages []json.RawMessage) (int, int) {
 	lastMsg := -1
 	lastBlock := -1
 
@@ -389,7 +395,49 @@ func findFrozenBoundary(rawMessages []json.RawMessage) (int, int) {
 		}
 	}
 
+	// Top-level Anthropic automatic caching (root "cache_control": {"type": "ephemeral"}):
+	// freeze all earlier conversation turns before the final user message so prior
+	// cached turns are never mutated even when no inline cache_control markers exist.
+	if hasTopLevelCacheControl(top) && len(rawMessages) > 0 {
+		autoMsg := len(rawMessages) - 1
+		if messageRole(rawMessages[len(rawMessages)-1]) == "user" {
+			autoMsg = len(rawMessages) - 2
+		}
+		if autoMsg > lastMsg {
+			lastMsg = autoMsg
+			lastBlock = freezeWholeMessage
+		} else if autoMsg == lastMsg && autoMsg >= 0 {
+			lastBlock = freezeWholeMessage
+		}
+	}
+
 	return lastMsg, lastBlock
+}
+
+func hasTopLevelCacheControl(top map[string]json.RawMessage) bool {
+	raw, ok := top["cache_control"]
+	if !ok {
+		return false
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	var cc anthropic.CacheControl
+	if err := json.Unmarshal(trimmed, &cc); err != nil {
+		return false
+	}
+	return cc.Type != ""
+}
+
+func messageRole(rawMsg json.RawMessage) string {
+	var m struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(rawMsg, &m); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(m.Role))
 }
 
 func isStrictlyAfterFrozen(msgIdx, blockIdx, frozenMsgIdx, frozenBlockIdx int) bool {

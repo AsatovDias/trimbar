@@ -407,3 +407,129 @@ func TestDuplicateReadSafetyGuards(t *testing.T) {
 		})
 	}
 }
+
+// TestTopLevelAutomaticCachePreserved verifies that when Anthropic top-level
+// automatic caching ("cache_control": {"type": "ephemeral"} at root JSON) is used
+// without inline cache_control markers inside messages, all earlier turns before
+// the final user message remain byte-for-byte untouched while the current turn's
+// trailing tool_results are safely trimmed.
+func TestTopLevelAutomaticCachePreserved(t *testing.T) {
+	fileBody := strings.Repeat("package proxy // stable cached file body\n", 25)
+	earlyANSI := "\x1b[31mEARLY_TURN_ANSI\x1b[0m"
+	currentANSI := "\x1b[1;32mPASS\x1b[0m current turn output"
+
+	payload := map[string]any{
+		"model":         "claude-sonnet-4-20250514",
+		"max_tokens":    8192,
+		"cache_control": map[string]string{"type": "ephemeral"},
+		"messages": []map[string]any{
+			{"role": "user", "content": "Review proxy/handler.go"},
+			// Turn 1: initial Read
+			{
+				"role": "assistant",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "tu_r1", "name": "Read", "input": map[string]string{"file_path": "internal/proxy/handler.go"}},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_r1", "content": fileBody},
+				},
+			},
+			// Turn 2 (EARLIER turn — must stay 100% frozen under automatic caching, even with dup Read + ANSI!)
+			{
+				"role": "assistant",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "tu_r2_early", "name": "Read", "input": map[string]string{"file_path": "internal/proxy/handler.go"}},
+					{"type": "tool_use", "id": "tu_b_early", "name": "Bash", "input": map[string]string{"command": "go test"}},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_r2_early", "content": fileBody},
+					{"type": "tool_result", "tool_use_id": "tu_b_early", "content": earlyANSI},
+				},
+			},
+			// Turn 3 (CURRENT turn — final user message is strictly after frozen prefix)
+			{
+				"role": "assistant",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "tu_r3_curr", "name": "Read", "input": map[string]string{"file_path": "internal/proxy/handler.go"}},
+					{"type": "tool_use", "id": "tu_b_curr", "name": "Bash", "input": map[string]string{"command": "go test ./..."}},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "tu_r3_curr", "content": fileBody},
+					{"type": "tool_result", "tool_use_id": "tu_b_curr", "content": currentANSI},
+				},
+			},
+		},
+	}
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var origTop map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &origTop)
+	var origMsgs []json.RawMessage
+	_ = json.Unmarshal(origTop["messages"], &origMsgs)
+
+	res, err := TrimRequest(raw)
+	if err != nil {
+		t.Fatalf("TrimRequest() error = %v", err)
+	}
+	if !res.Modified {
+		t.Fatalf("expected Modified=true for current turn waste")
+	}
+	if res.FrozenMessageIdx != 5 {
+		t.Errorf("FrozenMessageIdx = %d, want 5 (all earlier turns frozen before msg[6])", res.FrozenMessageIdx)
+	}
+	// Only current turn's duplicate Read (1) and ANSI (2 sequences) should be trimmed;
+	// Turn 2's duplicate Read and ANSI MUST remain untouched!
+	if res.DupReadsTrimmed != 1 {
+		t.Errorf("DupReadsTrimmed = %d, want 1 (only current turn)", res.DupReadsTrimmed)
+	}
+	if res.ANSIStrippedCount != 2 {
+		t.Errorf("ANSIStrippedCount = %d, want 2 (only current turn)", res.ANSIStrippedCount)
+	}
+
+	var newTop map[string]json.RawMessage
+	_ = json.Unmarshal(res.Body, &newTop)
+	var newMsgs []json.RawMessage
+	_ = json.Unmarshal(newTop["messages"], &newMsgs)
+
+	for i := 0; i <= 5; i++ {
+		if !bytes.Equal(origMsgs[i], newMsgs[i]) {
+			t.Errorf("earlier turn message[%d] was mutated under top-level automatic caching!\norig=%s\nnew =%s",
+				i, origMsgs[i], newMsgs[i])
+		}
+	}
+
+	// Trailing assistant prefill message (no trailing user turn): entire conversation must remain frozen.
+	prefillPayload := map[string]any{
+		"model":         "claude-sonnet-4-20250514",
+		"max_tokens":    4096,
+		"cache_control": map[string]string{"type": "ephemeral"},
+		"messages": []map[string]any{
+			{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r1", "name": "Read", "input": map[string]string{"file_path": "a.go"}}}},
+			{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r1", "content": fileBody}}},
+			{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r2", "name": "Read", "input": map[string]string{"file_path": "a.go"}}}},
+			{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r2", "content": fileBody}}},
+			{"role": "assistant", "content": "Let me analyze that..."},
+		},
+	}
+	prefillRaw, _ := json.Marshal(prefillPayload)
+	prefillRes, err := TrimRequest(prefillRaw)
+	if err != nil {
+		t.Fatalf("TrimRequest(prefill) error = %v", err)
+	}
+	if prefillRes.Modified || !bytes.Equal(prefillRes.Body, prefillRaw) {
+		t.Errorf("expected byte-for-byte preservation when trailing message is assistant under top-level cache_control")
+	}
+}
