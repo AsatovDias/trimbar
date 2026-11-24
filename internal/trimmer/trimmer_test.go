@@ -320,3 +320,90 @@ func TestTrimNestedBlockArrayToolResult(t *testing.T) {
 			res.Modified, res.DupReadsTrimmed, res.ANSIStrippedCount)
 	}
 }
+
+// TestDuplicateReadSafetyGuards guarantees that deduplication NEVER fires when:
+//  1) The original tool_result is shorter than 200 characters
+//  2) The original tool_result was compacted/summarized by Claude Code (/compact)
+//  3) The original tool_result is missing from the current messages array
+//  4) The file contents changed externally (different content on second Read)
+func TestDuplicateReadSafetyGuards(t *testing.T) {
+	fullBody := strings.Repeat("package main // full genuine source code line\n", 20) // > 900 chars
+	shortBody := "package main\nfunc main() { println(\"short < 200 chars\") }\n"
+	compactedStub := "[Compacted summary of previous conversation] " + strings.Repeat("Earlier we read main.go and discussed architecture. ", 8)
+	changedBody := strings.Repeat("package main // modified externally via bash!\n", 20)
+
+	cases := []struct {
+		name           string
+		messages       []map[string]any
+		wantDupTrimmed int
+	}{
+		{
+			name: "short original tool_result (<200 chars) is NOT deduplicated",
+			messages: []map[string]any{
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r1", "name": "Read", "input": map[string]string{"file_path": "short.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r1", "content": shortBody, "cache_control": map[string]string{"type": "ephemeral"}}}},
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r2", "name": "Read", "input": map[string]string{"file_path": "short.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r2", "content": shortBody}}},
+			},
+			wantDupTrimmed: 0,
+		},
+		{
+			name: "compacted /compact summary stub is NOT treated as full original Read",
+			messages: []map[string]any{
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r1", "name": "Read", "input": map[string]string{"file_path": "main.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r1", "content": compactedStub, "cache_control": map[string]string{"type": "ephemeral"}}}},
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r2", "name": "Read", "input": map[string]string{"file_path": "main.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r2", "content": fullBody}}},
+			},
+			wantDupTrimmed: 0,
+		},
+		{
+			name: "missing original tool_result in messages is NOT deduplicated",
+			messages: []map[string]any{
+				{"role": "user", "content": []map[string]any{{"type": "text", "text": "Summary: earlier we read main.go", "cache_control": map[string]string{"type": "ephemeral"}}}},
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r1", "name": "Read", "input": map[string]string{"file_path": "main.go"}}}},
+				// Notice: no tool_result for r1!
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r2", "name": "Read", "input": map[string]string{"file_path": "main.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r2", "content": fullBody}}},
+			},
+			wantDupTrimmed: 0,
+		},
+		{
+			name: "externally changed file content is NOT deduplicated",
+			messages: []map[string]any{
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r1", "name": "Read", "input": map[string]string{"file_path": "main.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r1", "content": fullBody, "cache_control": map[string]string{"type": "ephemeral"}}}},
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r2", "name": "Read", "input": map[string]string{"file_path": "main.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r2", "content": changedBody}}},
+			},
+			wantDupTrimmed: 0,
+		},
+		{
+			name: "full uncompacted identical original tool_result IS deduplicated",
+			messages: []map[string]any{
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r1", "name": "Read", "input": map[string]string{"file_path": "main.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r1", "content": fullBody, "cache_control": map[string]string{"type": "ephemeral"}}}},
+				{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "r2", "name": "Read", "input": map[string]string{"file_path": "main.go"}}}},
+				{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "r2", "content": fullBody}}},
+			},
+			wantDupTrimmed: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, _ := json.Marshal(map[string]any{
+				"model":      "claude-sonnet-4-20250514",
+				"max_tokens": 4096,
+				"messages":   tc.messages,
+			})
+			res, err := TrimRequest(raw)
+			if err != nil {
+				t.Fatalf("TrimRequest() error = %v", err)
+			}
+			if res.DupReadsTrimmed != tc.wantDupTrimmed {
+				t.Errorf("DupReadsTrimmed = %d, want %d", res.DupReadsTrimmed, tc.wantDupTrimmed)
+			}
+		})
+	}
+}

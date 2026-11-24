@@ -67,12 +67,32 @@ func NewResolver() *Resolver {
 
 // Resolve inspects an anthropic.InspectionResult and returns full Attribution
 // (cwd, git repo, git branch, and session_id).
+// If cwd is absent from the system prompt or is outside a Git repo, it falls back
+// to file/directory paths seen in the first tool_use calls (Read/Glob/Grep/Edit).
 func (r *Resolver) Resolve(insp *anthropic.InspectionResult) Attribution {
 	if insp == nil {
 		return Attribution{SessionID: "sess_unknown"}
 	}
 	cwd := ExtractCWD(insp.SystemPromptText)
 	gm := r.ResolveGitMeta(cwd)
+
+	// Fallback: resolve Git repository from tool_use file paths when system prompt lacks cwd.
+	if !gm.IsGit && len(insp.ToolFilePaths) > 0 {
+		for _, candidate := range insp.ToolFilePaths {
+			if candidate == "" {
+				continue
+			}
+			fb := r.ResolveGitMeta(candidate)
+			if fb.IsGit {
+				gm = fb
+				if cwd == "" {
+					cwd = fb.RepoRoot
+				}
+				break
+			}
+		}
+	}
+
 	sessionID := DeriveSessionID(insp, cwd)
 
 	return Attribution{

@@ -35,6 +35,7 @@ type RequestLog struct {
 	CacheReadTokens     int64 `json:"cache_read_tokens"`
 
 	CostUSD            float64 `json:"cost_usd"`
+	CostEstimated      bool    `json:"cost_estimated"`
 	CacheSavingsUSD    float64 `json:"cache_savings_usd"`
 	NetCacheSavingsUSD float64 `json:"net_cache_savings_usd"`
 	ShadowSavingsUSD   float64 `json:"shadow_savings_usd"`
@@ -101,6 +102,7 @@ type ModelStats struct {
 	CacheReadTokens     int64   `json:"cache_read_tokens"`
 	CacheHitRatio       float64 `json:"cache_hit_ratio"`
 	CostUSD             float64 `json:"cost_usd"`
+	Estimated           bool    `json:"estimated"`
 }
 
 // RepoBranchStats aggregates telemetry per Git repository & branch.
@@ -112,6 +114,7 @@ type RepoBranchStats struct {
 	SubagentRequests  int64   `json:"subagent_requests"`
 	CacheHitRatio     float64 `json:"cache_hit_ratio"`
 	CostUSD           float64 `json:"cost_usd"`
+	Estimated         bool    `json:"estimated"`
 	WastedTokens      int64   `json:"wasted_tokens"`
 }
 
@@ -127,6 +130,7 @@ type StatsSummary struct {
 	CacheReadTokens           int64             `json:"cache_read_tokens"`
 	CacheHitRatio             float64           `json:"cache_hit_ratio"`
 	TotalCostUSD              float64           `json:"total_cost_usd"`
+	HasEstimatedCost          bool              `json:"has_estimated_cost"`
 	TotalCacheSavingsUSD      float64           `json:"total_cache_savings_usd"`
 	TotalNetCacheSavingsUSD   float64           `json:"total_net_cache_savings_usd"`
 	TotalShadowSavingsUSD     float64           `json:"total_shadow_savings_usd"`
@@ -210,7 +214,7 @@ INSERT INTO requests (
 	timestamp, session_id, request_id, method, path, status_code, model, agent_role, is_streaming,
 	git_repo, git_branch, cwd,
 	input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-	cost_usd, cache_savings_usd, net_cache_savings_usd, shadow_savings_usd,
+	cost_usd, cost_estimated, cache_savings_usd, net_cache_savings_usd, shadow_savings_usd,
 	latency_ms, ttfb_ms,
 	cache_breakpoints, cache_miss_anomaly, cache_miss_reason,
 	system_est_tokens, tools_est_tokens, messages_est_tokens, tool_results_est_tokens,
@@ -223,7 +227,7 @@ INSERT INTO requests (
 	?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?,
 	?, ?, ?, ?,
-	?, ?, ?, ?,
+	?, ?, ?, ?, ?,
 	?, ?,
 	?, ?, ?,
 	?, ?, ?, ?,
@@ -252,6 +256,7 @@ INSERT INTO requests (
 		rec.CacheCreationTokens,
 		rec.CacheReadTokens,
 		rec.CostUSD,
+		boolToInt(rec.CostEstimated),
 		rec.CacheSavingsUSD,
 		rec.NetCacheSavingsUSD,
 		rec.ShadowSavingsUSD,
@@ -335,6 +340,7 @@ SELECT
 	COALESCE(SUM(cache_creation_tokens), 0),
 	COALESCE(SUM(cache_read_tokens), 0),
 	COALESCE(SUM(cost_usd), 0),
+	COALESCE(MAX(cost_estimated), 0),
 	COALESCE(SUM(cache_savings_usd), 0),
 	COALESCE(SUM(net_cache_savings_usd), 0),
 	COALESCE(SUM(shadow_savings_usd), 0),
@@ -350,6 +356,7 @@ SELECT
 	COALESCE(SUM(CASE WHEN failover_used = 1 THEN 1 ELSE 0 END), 0)
 FROM requests %s;`, where)
 
+	var hasEstInt int
 	if err := r.db.sqlDB.QueryRowContext(ctx, aggQ, args...).Scan(
 		&summary.TotalRequests,
 		&summary.MainAgentRequests,
@@ -360,6 +367,7 @@ FROM requests %s;`, where)
 		&summary.CacheCreationTokens,
 		&summary.CacheReadTokens,
 		&summary.TotalCostUSD,
+		&hasEstInt,
 		&summary.TotalCacheSavingsUSD,
 		&summary.TotalNetCacheSavingsUSD,
 		&summary.TotalShadowSavingsUSD,
@@ -376,6 +384,7 @@ FROM requests %s;`, where)
 	); err != nil {
 		return nil, fmt.Errorf("query stats aggregate: %w", err)
 	}
+	summary.HasEstimatedCost = hasEstInt == 1
 
 	totalPrompt := summary.InputTokens + summary.CacheCreationTokens + summary.CacheReadTokens
 	if totalPrompt > 0 {
@@ -391,7 +400,8 @@ SELECT
 	COALESCE(SUM(output_tokens), 0),
 	COALESCE(SUM(cache_creation_tokens), 0),
 	COALESCE(SUM(cache_read_tokens), 0),
-	COALESCE(SUM(cost_usd), 0)
+	COALESCE(SUM(cost_usd), 0),
+	COALESCE(MAX(cost_estimated), 0)
 FROM requests %s
 GROUP BY m
 ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC;`, where)
@@ -402,6 +412,7 @@ ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC;`, where)
 	}
 	for rows.Next() {
 		var ms ModelStats
+		var estInt int
 		if err := rows.Scan(
 			&ms.Model,
 			&ms.Requests,
@@ -410,10 +421,12 @@ ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC;`, where)
 			&ms.CacheCreationTokens,
 			&ms.CacheReadTokens,
 			&ms.CostUSD,
+			&estInt,
 		); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
+		ms.Estimated = estInt == 1
 		tot := ms.InputTokens + ms.CacheCreationTokens + ms.CacheReadTokens
 		if tot > 0 {
 			ms.CacheHitRatio = float64(ms.CacheReadTokens) / float64(tot)
@@ -436,6 +449,7 @@ SELECT
 	COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0),
 	COALESCE(SUM(cache_read_tokens), 0),
 	COALESCE(SUM(cost_usd), 0),
+	COALESCE(MAX(cost_estimated), 0),
 	COALESCE(SUM(total_wasted_tokens), 0)
 FROM requests %s
 GROUP BY r, b
@@ -448,6 +462,7 @@ ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC;`, where)
 	for repoRows.Next() {
 		var rs RepoBranchStats
 		var totIn, readIn int64
+		var estInt int
 		if err := repoRows.Scan(
 			&rs.Repo,
 			&rs.Branch,
@@ -457,11 +472,13 @@ ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC;`, where)
 			&totIn,
 			&readIn,
 			&rs.CostUSD,
+			&estInt,
 			&rs.WastedTokens,
 		); err != nil {
 			_ = repoRows.Close()
 			return nil, err
 		}
+		rs.Estimated = estInt == 1
 		if totIn > 0 {
 			rs.CacheHitRatio = float64(readIn) / float64(totIn)
 		}
@@ -491,7 +508,7 @@ SELECT
 	id, timestamp, session_id, request_id, method, path, status_code, model, agent_role, is_streaming,
 	git_repo, git_branch, cwd,
 	input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-	cost_usd, cache_savings_usd, net_cache_savings_usd, shadow_savings_usd,
+	cost_usd, cost_estimated, cache_savings_usd, net_cache_savings_usd, shadow_savings_usd,
 	latency_ms, ttfb_ms,
 	cache_breakpoints, cache_miss_anomaly, cache_miss_reason,
 	system_est_tokens, tools_est_tokens, messages_est_tokens, tool_results_est_tokens,
@@ -518,6 +535,7 @@ LIMIT ?;`, where)
 			rec         RequestLog
 			tsStr       string
 			isStreamInt int
+			costEstInt  int
 			anomalyInt  int
 			failoverInt int
 			dupJSON     string
@@ -527,7 +545,7 @@ LIMIT ?;`, where)
 			&rec.StatusCode, &rec.Model, &rec.AgentRole, &isStreamInt,
 			&rec.GitRepo, &rec.GitBranch, &rec.CWD,
 			&rec.InputTokens, &rec.OutputTokens, &rec.CacheCreationTokens, &rec.CacheReadTokens,
-			&rec.CostUSD, &rec.CacheSavingsUSD, &rec.NetCacheSavingsUSD, &rec.ShadowSavingsUSD,
+			&rec.CostUSD, &costEstInt, &rec.CacheSavingsUSD, &rec.NetCacheSavingsUSD, &rec.ShadowSavingsUSD,
 			&rec.LatencyMS, &rec.TTFBMS,
 			&rec.CacheBreakpoints, &anomalyInt, &rec.CacheMissReason,
 			&rec.SystemEstTokens, &rec.ToolsEstTokens, &rec.MessagesEstTokens, &rec.ToolResultsEstTokens,
@@ -544,6 +562,7 @@ LIMIT ?;`, where)
 			rec.Timestamp = parsedTS
 		}
 		rec.IsStreaming = isStreamInt == 1
+		rec.CostEstimated = costEstInt == 1
 		rec.CacheMissAnomaly = anomalyInt == 1
 		rec.FailoverUsed = failoverInt == 1
 		if dupJSON != "" && dupJSON != "[]" {

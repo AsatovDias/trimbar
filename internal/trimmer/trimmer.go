@@ -2,6 +2,7 @@ package trimmer
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -9,6 +10,11 @@ import (
 
 	"github.com/trimbar/trimbar/internal/anthropic"
 )
+
+// MinOriginalReadChars is the minimum character length an earlier Read tool_result
+// must physically have in the current messages array to qualify as a full uncompacted
+// read eligible for downstream deduplication.
+const MinOriginalReadChars = 200
 
 // TrimResult describes the outcome of cache-safe active trimming on a /v1/messages request.
 type TrimResult struct {
@@ -30,6 +36,11 @@ type readMeta struct {
 	rawPath  string
 }
 
+type seenReadEntry struct {
+	contentHash [32]byte
+	contentLen  int
+}
+
 type toolInputPath struct {
 	FilePath string `json:"file_path"`
 	Path     string `json:"path"`
@@ -48,7 +59,8 @@ type toolInputPath struct {
 //     are eligible for:
 //     1) Stripping ANSI escape sequences from terminal output.
 //     2) Replacing redundant full-file Read results (offset==0, limit==0, not modified
-//        by an intervening Edit/Write) with a short placeholder.
+//        by an intervening Edit/Write) ONLY when the full, uncompacted (>=200 chars),
+//        identical original tool_result physically exists earlier in messages.
 func TrimRequest(body []byte) (TrimResult, error) {
 	res := TrimResult{
 		Body:             body,
@@ -84,10 +96,10 @@ func TrimRequest(body []byte) (TrimResult, error) {
 	res.FrozenMessageIdx = frozenMsgIdx
 	res.FrozenBlockIdx = frozenBlockIdx
 
-	// Pass 2: Walk messages chronologically from index 0 to track full-file Reads and
-	// Edit/Write invalidations across the entire history, while ONLY mutating
+	// Pass 2: Walk messages chronologically from index 0 to track verified full-file Reads
+	// physically present in messages and Edit/Write invalidations, while ONLY mutating
 	// tool_result blocks strictly after (frozenMsgIdx, frozenBlockIdx).
-	seenReads := make(map[string]bool)
+	seenReads := make(map[string]seenReadEntry)
 	pendingReads := make(map[string]readMeta)
 	dupFileSeen := make(map[string]bool)
 
@@ -149,27 +161,34 @@ func TrimRequest(body []byte) (TrimResult, error) {
 					_ = json.Unmarshal(rawIsErr, &isErr)
 				}
 
+				rawResultContent, hasResultContent := blockObj["content"]
+
 				// Determine if this tool_result corresponds to a full-file Read call.
 				meta, isTrackedRead := pendingReads[toolUseID]
 				isDuplicateRead := false
 				if isTrackedRead {
 					delete(pendingReads, toolUseID)
-					if !isErr {
-						if seenReads[meta.normPath] {
-							isDuplicateRead = true
-						} else {
-							seenReads[meta.normPath] = true
+					if !isErr && hasResultContent {
+						resultText, textOK := extractToolResultText(rawResultContent)
+						if textOK && isFullUncompactedReadContent(resultText) {
+							sum := sha256.Sum256([]byte(resultText))
+							if prev, exists := seenReads[meta.normPath]; exists && prev.contentHash == sum {
+								// Original full uncompacted Read is physically present in messages
+								// and matches byte-for-byte -> safe to deduplicate.
+								isDuplicateRead = true
+							} else {
+								// Record (or refresh if file changed externally) the live full content.
+								seenReads[meta.normPath] = seenReadEntry{
+									contentHash: sum,
+									contentLen:  len(resultText),
+								}
+							}
 						}
 					}
 				}
 
 				// Frozen prefix protection: NEVER mutate anything at or before cache_control!
-				if !isAfterFrozen {
-					continue
-				}
-
-				rawResultContent, hasResultContent := blockObj["content"]
-				if !hasResultContent {
+				if !isAfterFrozen || !hasResultContent {
 					continue
 				}
 
@@ -258,6 +277,84 @@ func TrimRequest(body []byte) (TrimResult, error) {
 	return res, nil
 }
 
+// isFullUncompactedReadContent verifies that a Read tool_result contains genuine,
+// full file content (>= MinOriginalReadChars) rather than a compacted/truncated stub
+// created by Claude Code's /compact or an earlier Trimbar placeholder.
+func isFullUncompactedReadContent(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) < MinOriginalReadChars {
+		return false
+	}
+
+	lower := strings.ToLower(trimmed)
+	compactedPrefixes := []string{
+		"[trimbar:",
+		"[compacted",
+		"[summary",
+		"[truncated",
+		"[file content omitted",
+		"[content omitted",
+		"[previous tool result",
+		"<summary>",
+		"<compacted",
+		"this session is being continued from a previous conversation",
+	}
+	for _, p := range compactedPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return false
+		}
+	}
+
+	compactedSubstrings := []string{
+		"compacted by claude",
+		"output truncated due to context",
+		"content omitted after /compact",
+		"summarized to save context",
+	}
+	for _, sub := range compactedSubstrings {
+		if strings.Contains(lower, sub) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func extractToolResultText(rawContent json.RawMessage) (string, bool) {
+	trimmed := bytes.TrimSpace(rawContent)
+	if len(trimmed) == 0 {
+		return "", false
+	}
+	switch trimmed[0] {
+	case '"':
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return "", false
+		}
+		return text, true
+	case '[':
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(trimmed, &blocks); err != nil || len(blocks) == 0 {
+			return "", false
+		}
+		var sb strings.Builder
+		for i, b := range blocks {
+			if b.Type != "text" {
+				return "", false
+			}
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(b.Text)
+		}
+		return sb.String(), true
+	}
+	return "", false
+}
+
 // duplicateReadPlaceholder returns the concise marker replacing redundant Read results.
 func duplicateReadPlaceholder(filePath string) string {
 	return fmt.Sprintf("[Trimbar: identical content of %s already loaded earlier in context]", filePath)
@@ -308,7 +405,7 @@ func isStrictlyAfterFrozen(msgIdx, blockIdx, frozenMsgIdx, frozenBlockIdx int) b
 	return false
 }
 
-func trackAssistantToolUse(blockObj map[string]json.RawMessage, seenReads map[string]bool, pendingReads map[string]readMeta) {
+func trackAssistantToolUse(blockObj map[string]json.RawMessage, seenReads map[string]seenReadEntry, pendingReads map[string]readMeta) {
 	var name, id string
 	if rawName, ok := blockObj["name"]; ok {
 		_ = json.Unmarshal(rawName, &name)

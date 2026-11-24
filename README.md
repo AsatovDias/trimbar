@@ -23,23 +23,66 @@ When running Claude Code on real repositories, token burn and latency spikes are
 ## What Trimbar Does
 
 - **Zero-Buffer SSE Forwarding:** Streams chunks from Anthropic to Claude Code with immediate `http.Flusher` writes (`<5ms` proxy overhead) while asynchronously parsing usage events in a separate goroutine.
-- **Exact Prompt Cache & Cost Accounting:** Extracts `input_tokens`, `cache_creation_input_tokens` (5m & 1h TTL), `cache_read_input_tokens`, and `output_tokens` from Anthropic SSE streams and non-streaming responses, computing exact USD spend, net cache savings, and **honest shadow savings** weighted by your actual blended prompt rate.
+- **Exact Prompt Cache & Cost Accounting:** Extracts `input_tokens`, `cache_creation_input_tokens` (5m & 1h TTL), `cache_read_input_tokens`, and `output_tokens` from Anthropic SSE streams and non-streaming responses, computing exact USD spend, net cache savings, and **honest shadow savings** weighted by your actual blended prompt rate. Unknown or future models automatically fall back to Sonnet-tier estimates marked with `~$` instead of reporting `$0`.
 - **Context Inspector:** Detects redundant `Read` calls (ignoring legitimate re-reads after `Edit`/`Write` and distinct `offset`/`limit` slices) and ANSI CSI/OSC escape sequence overhead inside `tool_result` blocks.
-- **Cache-Safe Active Trimming (`--trim`):** Opt-in outbound request optimizer that strips ANSI codes and deduplicates redundant full-file `Read` results strictly **after** the last `cache_control` breakpoint — preserving the frozen prompt cache prefix byte-for-byte while tracking actual trimmed tokens and USD saved.
+- **Cache-Safe Active Trimming (`--trim`):** Opt-in outbound request optimizer that strips ANSI codes and deduplicates redundant full-file `Read` results strictly **after** the last `cache_control` breakpoint — preserving the frozen prompt cache prefix byte-for-byte, verifying the full uncompacted original `tool_result` (`>= 200` chars) is physically present before deduplicating, and tracking actual trimmed tokens and USD saved.
 - **Embedded Offline Web UI (`/ui`):** Built-in dark dashboard embedded directly into the single binary via `go:embed` (zero external CDNs) with live KPI cards, `/api/stats` & `/api/inspect` endpoints, and an interactive **Context Flamegraph** showing System, Tools, Tool Outputs, Dup Read/Trimmed waste, ANSI noise, and Chat History per turn.
 - **Auto-Retry & Failover (`429` / `529`):** Automatically recovers from transient Anthropic rate limits (`429`) and overload (`529`) before SSE streaming starts — retrying up to 2× with `Retry-After` / exponential backoff (`1s → 2s`) or instantly failing over to a configured `fallback_upstream` / `fallback_api_key`.
 - **Cache Miss Anomaly Detection:** Tracks consecutive main-agent turns per session and flags sudden drops in cache hit rate accompanied by large cache-creation spikes.
-- **Automatic Git & Role Attribution:** Extracts `cwd` from Claude Code's system prompt and resolves the local Git repository and branch directly from `.git` (including worktrees and detached HEADs) — no agent configuration required. Distinguishes `[main]` agent turns from `[sub]` background Haiku sub-agents.
+- **Automatic Git & Role Attribution:** Extracts `cwd` from Claude Code's system prompt (with fallback to `Read`/`Glob`/`Grep`/`Edit` tool paths) and resolves the local Git repository and branch directly from `.git` (including worktrees and detached HEADs) — no agent configuration required. Distinguishes `[main]` agent turns from `[sub]` background Haiku and read-only Explore sub-agents.
 - **Transparent Pass-Through:** Preserves all headers (`x-api-key`, OAuth `Authorization`, `anthropic-beta`, `anthropic-version`) and passes upstream errors (`429 Too Many Requests`, `529 Overloaded`, `Retry-After`, `anthropic-ratelimit-*`) through verbatim so Claude Code's own retry logic works untouched.
 - **100% Local-First:** Zero external calls other than forwarding your requests to `api.anthropic.com`. Everything stays in `~/.trimbar/trimbar.db`.
 
 ---
 
-## Quickstart
+## Why Trimbar vs ccusage / OpenTelemetry / LiteLLM
 
-### Download Prebuilt Binary (Windows)
+| Capability | **Trimbar** | `ccusage` | OpenTelemetry Stack | LiteLLM Proxy |
+| :--- | :---: | :---: | :---: | :---: |
+| Single static binary (zero Docker / Python / DB setup) | **Yes** | Yes (Node) | No (Collector + Grafana/Tempo) | No (Python + Postgres/Redis) |
+| Live reverse proxy with `<5ms` zero-buffer SSE | **Yes** | No (offline JSONL log reader) | No (passive telemetry) | Yes (higher overhead) |
+| Interactive **Context Flamegraph** (System / Tools / Dup Read / ANSI) | **Yes (`/ui`)** | No | Manual dashboards only | No |
+| **Cache-Safe Active Trimming** (strips waste without breaking Prompt Cache) | **Yes (`--trim`)** | No | No | No |
+| **429 / 529 Auto-Retry & Instant Failover** | **Yes** | No | No | Yes |
+| Automatic Git repo/branch & Main vs Explore sub-agent split | **Yes** | Partial | Manual tags | Manual metadata |
+| 100% offline SQLite metadata only (never stores prompt text) | **Yes** | Local logs | Depends on backend | Optional logging |
 
-Download `trimbar.exe` (windows-amd64) directly from the [GitHub Releases](https://github.com/AsatovDias/trimbar/releases/latest) page.
+---
+
+## Installation & Quickstart
+
+### Download Prebuilt Binaries
+
+Prebuilt zero-CGO static binaries for macOS, Linux, and Windows (plus `checksums.txt`) are published on [GitHub Releases](https://github.com/AsatovDias/trimbar/releases/latest):
+
+#### macOS (Apple Silicon — `arm64`)
+```bash
+curl -fsSL -o trimbar https://github.com/AsatovDias/trimbar/releases/latest/download/trimbar-darwin-arm64
+chmod +x trimbar
+xattr -d com.apple.quarantine trimbar 2>/dev/null || true
+sudo mv trimbar /usr/local/bin/trimbar
+```
+
+#### macOS (Intel — `amd64`)
+```bash
+curl -fsSL -o trimbar https://github.com/AsatovDias/trimbar/releases/latest/download/trimbar-darwin-amd64
+chmod +x trimbar
+xattr -d com.apple.quarantine trimbar 2>/dev/null || true
+sudo mv trimbar /usr/local/bin/trimbar
+```
+
+#### Linux (`amd64`)
+```bash
+curl -fsSL -o trimbar https://github.com/AsatovDias/trimbar/releases/latest/download/trimbar-linux-amd64
+chmod +x trimbar
+sudo mv trimbar /usr/local/bin/trimbar
+```
+
+#### Windows (`amd64` PowerShell)
+```powershell
+Invoke-WebRequest -Uri "https://github.com/AsatovDias/trimbar/releases/latest/download/trimbar-windows-amd64.exe" -OutFile "trimbar.exe"
+.\trimbar.exe version
+```
 
 ### Build from Source
 
@@ -267,6 +310,24 @@ Claude Code CLI
 
 ---
 
+## Privacy & What SQLite Stores
+
+Trimbar is **100% local-first** and makes zero external network calls other than proxying your own Anthropic requests to `api.anthropic.com` (or your configured `fallback_upstream`).
+
+**What IS stored in `~/.trimbar/trimbar.db` (metadata & counters only):**
+- Request timestamp, HTTP method/path/status, latency & TTFB (ms), retry & failover counts
+- Model name, agent role (`main` / `subagent`), opaque `session_id`
+- Exact token counts (`input`, `output`, `cache_creation`, `cache_read`, `trimmed_tokens`) and USD cost/savings figures
+- Estimated section sizes (`system`, `tools`, `tool_results`, `messages` token counts) and ANSI escape counts
+- File paths (names only) of duplicate `Read` hotspots and local Git repository / branch names
+
+**What is NEVER written to disk:**
+- Source code contents or file bodies returned by `Read` / `Grep` / `Bash`
+- System prompt texts, user prompts, assistant responses, or thinking blocks
+- Anthropic API keys (`x-api-key`) or OAuth `Authorization` tokens
+
+---
+
 ## Configuration
 
 Trimbar creates `~/.trimbar/` (`0700` permissions) automatically and stores `trimbar.db` inside it. You can optionally place `~/.trimbar/config.toml` or override via environment variables:
@@ -298,12 +359,13 @@ go test -v -count=1 ./...
 The test suite verifies:
 - Zero-buffering SSE forwarding latency (`<50ms` per chunk, verified non-buffered delivery)
 - Fragmented SSE & prompt cache token parsing (`input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`, 5m/1h TTL)
-- Cache-safe active trimming: byte-for-byte frozen prefix preservation up to the last `cache_control`, post-cache duplicate `Read` & ANSI trimming, and `Edit`/`Write` deduplication reset
+- Cache-safe active trimming: byte-for-byte frozen prefix preservation up to the last `cache_control`, safety guards against `/compact` stubs / `<200`-char originals / missing originals / externally modified files, post-cache duplicate `Read` & ANSI trimming, and `Edit`/`Write` deduplication reset
 - Auto-retry on `429`/`529` (with exponential backoff & `Retry-After`), instant failover to `fallback_upstream` / `fallback_api_key`, and verbatim error pass-through when retries are exhausted
-- Embedded offline Web UI (`GET /ui` with zero external CDNs, `/api/stats`, `/api/inspect`)
-- Duplicate `Read` detection (with `Edit`/`Write` invalidation & `offset`/`limit` awareness) and ANSI escape detection
-- Git repo/branch/worktree & `session_id` resolution
-- SQLite WAL mode initialization, safe v1→v3 `ALTER TABLE` migrations, stats aggregation, and end-to-end `trimbar demo` / `trimbar demo --trim` pipelines
+- Embedded offline Web UI (`GET /ui` with zero external CDNs, inline SVG favicon, `GET /` → `/ui` redirect, `/api/stats`, `/api/inspect`)
+- Fallback Sonnet pricing (`Estimated: true`, `~$` display) for unknown/future models
+- Read-only Explore sub-agent detection (`Read`/`Grep`/`Glob` without `Edit`/`Write`), duplicate `Read` & ANSI detection
+- Git repo/branch/worktree & `session_id` resolution (including fallback from `tool_use` file paths)
+- SQLite WAL mode initialization, safe v1→v4 `ALTER TABLE` migrations, stats aggregation, and end-to-end `trimbar demo` / `trimbar demo --trim` pipelines
 
 ---
 
@@ -312,8 +374,9 @@ The test suite verifies:
 - [x] **Phase 0 — Transparent Gateway:** Zero-buffer SSE reverse proxy, header preservation, verbatim `429`/`529` error pass-through, Anthropic SSE usage & cache parser.
 - [x] **Phase 1 — Observability MVP (`v0.1.0`):** Pure-Go SQLite WAL storage, automatic Git repo/branch & `session_id` attribution, Main vs Sub-agent classification, duplicate `Read` & ANSI detectors, Cache Miss Anomaly alerts, `trimbar start` / `stats` / `inspect` / `demo` CLI.
 - [x] **Phase 2 — Cache-Safe Active Trimming (`v0.2.0`):** Opt-in `--trim` mode preserving the frozen `cache_control` prefix byte-for-byte while stripping ANSI escape noise and deduplicating redundant full-file `Read` results after the cache boundary, with actual trimmed token & USD tracking.
-- [x] **Phase 3 — Local Web UI & Resilience (`v0.3.0`):** Embedded offline Web UI (`http://127.0.0.1:8787/ui`) with interactive Context Flamegraph, JSON APIs (`/api/stats`, `/api/inspect`), and automatic `429`/`529` retry + failover (`fallback_upstream` / `fallback_api_key`).
-- [ ] **Phase 4 — Deep Diagnostics & Ecosystem:** MCP tool-schema diffing to pinpoint exact root causes of Cache Miss Anomalies, daily/branch budget alerts, Homebrew / Scoop / multi-platform GitHub Releases binaries (macOS, Linux, Windows), and Bedrock/Vertex Anthropic endpoint support.
+- [x] **Phase 3 — Local Web UI & Resilience (`v0.3.0` / `v0.3.1`):** Embedded offline Web UI (`http://127.0.0.1:8787/ui`) with brand identity, interactive Context Flamegraph, JSON APIs (`/api/stats`, `/api/inspect`), and automatic `429`/`529` retry + failover (`fallback_upstream` / `fallback_api_key`).
+- [x] **Phase 4 — Hardening & Cross-Platform Releases (`v0.4.0`):** `/compact`-safe Read deduplication guards, tool-path Git fallback & read-only Explore sub-agent heuristics, Sonnet fallback pricing (`~$`), Privacy & comparison docs, and automated GitHub Actions releases for macOS (`arm64`/`amd64`), Linux (`amd64`), and Windows (`amd64`).
+- [ ] **Phase 5 — Deep Diagnostics & Ecosystem:** MCP tool-schema diffing to pinpoint exact root causes of Cache Miss Anomalies, daily/branch budget alerts, Homebrew / Scoop formulas, and Bedrock/Vertex Anthropic endpoint support.
 
 ---
 

@@ -189,3 +189,39 @@ func TestDeriveSessionIDAndFullResolve(t *testing.T) {
 		t.Errorf("expected different session ID for a different conversation, both got %q", s1)
 	}
 }
+
+func TestResolveGitMetaFallbackFromToolFilePaths(t *testing.T) {
+	repoRoot := t.TempDir()
+	dotGit := filepath.Join(repoRoot, ".git")
+	srcDir := filepath.Join(repoRoot, "internal", "trimmer")
+	if err := os.MkdirAll(dotGit, 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("mkdir srcDir: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(dotGit, "HEAD"), []byte("ref: refs/heads/feat/audit\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dotGit, "config"), []byte("[remote \"origin\"]\n\turl = https://github.com/AsatovDias/trimbar.git\n"), 0o644)
+
+	targetFile := filepath.Join(srcDir, "trimmer.go")
+	_ = os.WriteFile(targetFile, []byte("package trimmer\n"), 0o644)
+
+	// System prompt contains NO Working directory line at all!
+	insp := &anthropic.InspectionResult{
+		SystemPromptText: "You are an automated coding assistant.",
+		ToolFilePaths:    []string{targetFile},
+		FirstUserText:    "Check trimmer.go",
+	}
+
+	resolver := NewResolver()
+	attr := resolver.Resolve(insp)
+	if !attr.IsGit {
+		t.Fatalf("expected IsGit=true via ToolFilePaths fallback, got %+v", attr)
+	}
+	if attr.Repo != "AsatovDias/trimbar" || attr.Branch != "feat/audit" {
+		t.Errorf("fallback attribution = (%q, %q), want (AsatovDias/trimbar, feat/audit)", attr.Repo, attr.Branch)
+	}
+	if attr.CWD != repoRoot {
+		t.Errorf("fallback CWD = %q, want %q", attr.CWD, repoRoot)
+	}
+}

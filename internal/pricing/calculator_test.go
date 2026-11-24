@@ -93,3 +93,34 @@ func TestHonestShadowSavings(t *testing.T) {
 			shadow.HonestSavingsUSD, shadow.UncachedSavingsUSD)
 	}
 }
+
+func TestFallbackSonnetPricingForUnknownModel(t *testing.T) {
+	calc := NewCalculator(config.Default())
+
+	usage := Usage{
+		InputTokens:          10_000, // $0.03 at Sonnet fallback ($3/MTok)
+		OutputTokens:         1_000,  // $0.015 at Sonnet fallback ($15/MTok)
+		CacheReadInputTokens: 10_000, // $0.003 at Sonnet fallback ($0.30/MTok)
+	}
+
+	got := calc.CalculateCost("claude-sonnet-5-20270101", usage)
+	if got.PricingKnown {
+		t.Errorf("expected PricingKnown=false for unknown future model")
+	}
+	if !got.Estimated {
+		t.Errorf("expected Estimated=true for fallback Sonnet pricing")
+	}
+	if !almostEqual(got.TotalCostUSD, 0.048, 1e-9) {
+		t.Errorf("fallback TotalCostUSD = %v, want 0.048", got.TotalCostUSD)
+	}
+
+	shadow := calc.CalculateShadowSavings("claude-sonnet-5-20270101", usage, 1_000)
+	if !shadow.Estimated || shadow.HonestSavingsUSD <= 0 {
+		t.Errorf("expected Estimated=true and HonestSavingsUSD>0, got %+v", shadow)
+	}
+
+	trimSave := calc.CalculateTrimmedSavings("claude-sonnet-5-20270101", 10_000)
+	if !almostEqual(trimSave, 0.03, 1e-9) {
+		t.Errorf("fallback CalculateTrimmedSavings = %v, want 0.03", trimSave)
+	}
+}

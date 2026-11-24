@@ -31,10 +31,21 @@ func (u Usage) CacheHitRatio() float64 {
 	return float64(u.CacheReadInputTokens) / float64(total)
 }
 
+// fallbackSonnetPricing is used when an unrecognized or future model identifier
+// is encountered, preventing silent $0 cost reporting.
+var fallbackSonnetPricing = config.ModelPricing{
+	InputPerMTok:        3.00,
+	OutputPerMTok:       15.00,
+	CacheWritePerMTok:   3.75,
+	CacheWrite1hPerMTok: 6.00,
+	CacheReadPerMTok:    0.30,
+}
+
 // CostBreakdown holds exact Anthropic USD costs and prompt-cache savings for a request.
 type CostBreakdown struct {
 	Model              string
 	PricingKnown       bool
+	Estimated          bool // True when fallback Sonnet pricing was applied for an unknown/future model
 	InputCostUSD       float64
 	OutputCostUSD      float64
 	CacheWriteCostUSD  float64
@@ -49,14 +60,15 @@ type CostBreakdown struct {
 // Rather than naively pricing all wasted tokens at full uncached input rates,
 // it reports the honest blended rate reflecting actual prompt cache usage.
 type ShadowSavings struct {
-	Model                string
-	PricingKnown         bool
-	WastedTokens         int64
+	Model                 string
+	PricingKnown          bool
+	Estimated             bool
+	WastedTokens          int64
 	EffectiveInputPerMTok float64 // Blended $/1M rate paid on this turn's prompt tokens
-	HonestSavingsUSD     float64 // WastedTokens priced at EffectiveInputPerMTok
-	UncachedSavingsUSD   float64 // Upper bound if tokens were uncached input
-	CacheWriteSavingsUSD float64 // Savings if avoided on a cache-creation turn
-	CacheReadSavingsUSD  float64 // Per-turn savings when waste sits inside cached prefix
+	HonestSavingsUSD      float64 // WastedTokens priced at EffectiveInputPerMTok
+	UncachedSavingsUSD    float64 // Upper bound if tokens were uncached input
+	CacheWriteSavingsUSD  float64 // Savings if avoided on a cache-creation turn
+	CacheReadSavingsUSD   float64 // Per-turn savings when waste sits inside cached prefix
 }
 
 // Calculator computes Anthropic USD costs and honest shadow savings.
@@ -73,15 +85,20 @@ func NewCalculator(cfg *config.Config) *Calculator {
 	return &Calculator{cfg: cfg}
 }
 
-// CalculateCost computes the exact USD cost breakdown for a single Anthropic turn.
-func (c *Calculator) CalculateCost(model string, usage Usage) CostBreakdown {
-	p, ok := c.cfg.LookupPricing(model)
-	if !ok {
-		return CostBreakdown{
-			Model:        model,
-			PricingKnown: false,
-		}
+func (c *Calculator) resolvePricing(model string) (p config.ModelPricing, known bool, estimated bool) {
+	if p, ok := c.cfg.LookupPricing(model); ok {
+		return p, true, false
 	}
+	if p, ok := c.cfg.LookupPricing("claude-sonnet-4"); ok {
+		return p, false, true
+	}
+	return fallbackSonnetPricing, false, true
+}
+
+// CalculateCost computes the USD cost breakdown for a single Anthropic turn.
+// Unknown/future models fall back to Sonnet pricing with Estimated=true instead of $0.
+func (c *Calculator) CalculateCost(model string, usage Usage) CostBreakdown {
+	p, known, estimated := c.resolvePricing(model)
 
 	inputCost := float64(usage.InputTokens) * p.InputPerMTok / tokensPerMillion
 	outputCost := float64(usage.OutputTokens) * p.OutputPerMTok / tokensPerMillion
@@ -118,7 +135,8 @@ func (c *Calculator) CalculateCost(model string, usage Usage) CostBreakdown {
 
 	return CostBreakdown{
 		Model:              model,
-		PricingKnown:       true,
+		PricingKnown:       known,
+		Estimated:          estimated,
 		InputCostUSD:       inputCost,
 		OutputCostUSD:      outputCost,
 		CacheWriteCostUSD:  cacheWriteCost,
@@ -137,14 +155,7 @@ func (c *Calculator) CalculateShadowSavings(model string, usage Usage, wastedTok
 	if wastedTokens <= 0 {
 		return ShadowSavings{Model: model}
 	}
-	p, ok := c.cfg.LookupPricing(model)
-	if !ok {
-		return ShadowSavings{
-			Model:        model,
-			PricingKnown: false,
-			WastedTokens: wastedTokens,
-		}
-	}
+	p, known, estimated := c.resolvePricing(model)
 
 	cost := c.CalculateCost(model, usage)
 	totalInput := usage.TotalInputTokens()
@@ -157,7 +168,8 @@ func (c *Calculator) CalculateShadowSavings(model string, usage Usage, wastedTok
 
 	return ShadowSavings{
 		Model:                 model,
-		PricingKnown:          true,
+		PricingKnown:          known,
+		Estimated:             estimated,
 		WastedTokens:          wastedTokens,
 		EffectiveInputPerMTok: effectivePerMTok,
 		HonestSavingsUSD:      float64(wastedTokens) * effectivePerMTok / tokensPerMillion,
@@ -176,9 +188,6 @@ func (c *Calculator) CalculateTrimmedSavings(model string, trimmedTokens int64) 
 	if trimmedTokens <= 0 {
 		return 0
 	}
-	p, ok := c.cfg.LookupPricing(model)
-	if !ok {
-		return 0
-	}
+	p, _, _ := c.resolvePricing(model)
 	return float64(trimmedTokens) * p.InputPerMTok / tokensPerMillion
 }

@@ -111,7 +111,8 @@ func TestInspectRequestCacheControlAndAgentRole(t *testing.T) {
 			{"type": "text", "text": "You are Claude Code.", "cache_control": {"type": "ephemeral"}}
 		],
 		"tools": [
-			{"name": "Read", "description": "Read a file", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}
+			{"name": "Read", "description": "Read a file", "input_schema": {"type": "object"}},
+			{"name": "Edit", "description": "Edit a file", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}
 		],
 		"messages": [
 			{
@@ -156,6 +157,34 @@ func TestInspectRequestCacheControlAndAgentRole(t *testing.T) {
 	}
 	if subRes.HasPromptCaching {
 		t.Errorf("expected HasPromptCaching=false for uncached subagent request")
+	}
+
+	// Read-only Sonnet Explore sub-agent: has Read/Grep/Glob but NO Edit/Write tools
+	exploreSubPayload := `{
+		"model": "claude-sonnet-4-20250514",
+		"max_tokens": 4096,
+		"stream": true,
+		"tools": [
+			{"name": "Read", "input_schema": {"type": "object"}},
+			{"name": "Grep", "input_schema": {"type": "object"}},
+			{"name": "Glob", "input_schema": {"type": "object"}}
+		],
+		"messages": [
+			{"role": "assistant", "content": [
+				{"type": "tool_use", "id": "tu_g1", "name": "Grep", "input": {"path": "/repo/internal/proxy", "pattern": "Flush"}},
+				{"type": "tool_use", "id": "tu_r1", "name": "Read", "input": {"file_path": "/repo/internal/proxy/handler.go"}}
+			]}
+		]
+	}`
+	exploreRes, err := InspectRequest([]byte(exploreSubPayload))
+	if err != nil {
+		t.Fatalf("InspectRequest(exploreSubPayload) error = %v", err)
+	}
+	if exploreRes.AgentRole != AgentRoleSubagent {
+		t.Errorf("read-only Sonnet Explore AgentRole = %q, want %q", exploreRes.AgentRole, AgentRoleSubagent)
+	}
+	if len(exploreRes.ToolFilePaths) != 2 || exploreRes.ToolFilePaths[0] != "/repo/internal/proxy" || exploreRes.ToolFilePaths[1] != "/repo/internal/proxy/handler.go" {
+		t.Errorf("ToolFilePaths = %v, want [/repo/internal/proxy /repo/internal/proxy/handler.go]", exploreRes.ToolFilePaths)
 	}
 }
 

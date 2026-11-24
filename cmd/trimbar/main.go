@@ -24,7 +24,7 @@ import (
 	"github.com/trimbar/trimbar/internal/webui"
 )
 
-var version = "0.3.1"
+var version = "0.4.0"
 
 // Lipgloss styles for terminal output.
 var (
@@ -390,6 +390,7 @@ func buildRequestLog(ev proxy.ProxyEvent, resolver *gitmeta.Resolver, repo *stor
 		LatencyMS:   ev.Latency.Milliseconds(),
 		TTFBMS:      ev.TTFB.Milliseconds(),
 		CostUSD:            ev.Cost.TotalCostUSD,
+		CostEstimated:      ev.Cost.Estimated,
 		CacheSavingsUSD:    ev.Cost.CacheSavingsUSD,
 		NetCacheSavingsUSD: ev.Cost.NetCacheSavingsUSD,
 		ShadowSavingsUSD:   ev.ShadowSavings.HonestSavingsUSD,
@@ -524,10 +525,17 @@ func printLiveEvent(rec *storage.RequestLog) {
 		rec.CacheHitRatio()*100,
 		formatTokens(rec.TotalInputTokens()),
 		formatTokens(rec.OutputTokens),
-		styleOK.Render(fmt.Sprintf("$%.4f", rec.CostUSD)),
+		styleOK.Render(formatUSD(rec.CostUSD, rec.CostEstimated)),
 		rec.LatencyMS,
 		flagStr,
 	)
+}
+
+func formatUSD(amount float64, estimated bool) string {
+	if estimated {
+		return fmt.Sprintf("~$%.4f", amount)
+	}
+	return fmt.Sprintf("$%.4f", amount)
 }
 
 func renderStats(s *storage.StatsSummary, window string) {
@@ -547,7 +555,7 @@ func renderStats(s *storage.StatsSummary, window string) {
 	))
 	card2 := styleCard.Render(fmt.Sprintf("%s\n%s\n%s",
 		styleMuted.Render("TOTAL SPEND"),
-		styleOK.Render(fmt.Sprintf("$%.4f", s.TotalCostUSD)),
+		styleOK.Render(formatUSD(s.TotalCostUSD, s.HasEstimatedCost)),
 		styleMuted.Render(fmt.Sprintf("avg latency %.0fms", s.AvgLatencyMS)),
 	))
 	card3 := styleCard.Render(fmt.Sprintf("%s\n%s\n%s",
@@ -590,7 +598,7 @@ func renderStats(s *storage.StatsSummary, window string) {
 				formatTokens(m.CacheCreationTokens),
 				formatTokens(m.OutputTokens),
 				m.CacheHitRatio*100,
-				fmt.Sprintf("$%.4f", m.CostUSD),
+				formatUSD(m.CostUSD, m.Estimated),
 			)
 		}
 		fmt.Println()
@@ -609,7 +617,7 @@ func renderStats(s *storage.StatsSummary, window string) {
 				r.MainAgentRequests,
 				r.SubagentRequests,
 				r.CacheHitRatio*100,
-				fmt.Sprintf("$%.4f", r.CostUSD),
+				formatUSD(r.CostUSD, r.Estimated),
 			)
 		}
 		fmt.Println()
@@ -710,7 +718,7 @@ func renderInspect(rep *storage.InspectReport) {
 			truncate(shortModel(t.Model), 16),
 			roleShort,
 			t.CacheHitRatio()*100,
-			fmt.Sprintf("$%.4f", t.CostUSD),
+			formatUSD(t.CostUSD, t.CostEstimated),
 			strings.Join(flags, " "),
 		)
 	}

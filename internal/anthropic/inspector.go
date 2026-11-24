@@ -59,6 +59,7 @@ type InspectionResult struct {
 	FirstUserText     string
 	MetadataUserID    string
 	MetadataSessionID string
+	ToolFilePaths     []string
 
 	SystemBytes          int
 	SystemEstTokens      int
@@ -159,9 +160,11 @@ func InspectParsedRequest(req *MessageRequest) *InspectionResult {
 	}
 	res.ToolsEstTokens = estimateTokens(res.ToolsBytes)
 
-	// 3. Index tool_result payloads by tool_use_id for accurate waste attribution
+	// 3. Index tool_result payloads by tool_use_id for accurate waste attribution,
+	//    collect file paths from tool_use calls for gitmeta fallback,
 	//    and inspect ANSI escape noise + message sizes.
 	toolResultBytesByID := make(map[string]int)
+	toolPathSeen := make(map[string]bool)
 	for _, msg := range req.Messages {
 		for _, block := range msg.Content.Blocks {
 			if block.CacheControl != nil && block.CacheControl.Type != "" {
@@ -175,6 +178,12 @@ func InspectParsedRequest(req *MessageRequest) *InspectionResult {
 				res.MessagesBytes += len(block.Thinking)
 			case "tool_use":
 				res.MessagesBytes += len(block.Name) + len(block.Input)
+				if len(res.ToolFilePaths) < 8 {
+					if p := extractToolUsePath(block.Name, block.Input); p != "" && !toolPathSeen[p] {
+						toolPathSeen[p] = true
+						res.ToolFilePaths = append(res.ToolFilePaths, p)
+					}
+				}
 			case "tool_result":
 				resultLen := block.Content.ByteLen()
 				res.MessagesBytes += resultLen
@@ -205,7 +214,8 @@ func InspectParsedRequest(req *MessageRequest) *InspectionResult {
 }
 
 // ClassifyAgentRole distinguishes Main Agent turns (Sonnet/Opus interactive loops)
-// from Claude Code background sub-agents (e.g., Haiku search, bash summarizer, title generator).
+// from Claude Code background sub-agents (e.g., Haiku helpers, read-only Explore/Search
+// sub-agents with Read/Grep/Glob and no Edit/Write tools, or tiny title/classifier calls).
 func ClassifyAgentRole(req *MessageRequest) string {
 	if req == nil {
 		return AgentRoleMain
@@ -214,11 +224,48 @@ func ClassifyAgentRole(req *MessageRequest) string {
 	if strings.Contains(modelLower, "haiku") {
 		return AgentRoleSubagent
 	}
+
+	// Signature of Claude Code's read-only exploration/search sub-agents (even on Sonnet):
+	// declares search/read tools (Read/Grep/Glob) without any file mutation tools (Edit/Write).
+	if len(req.Tools) > 0 {
+		hasReadSearch := false
+		hasMutate := false
+		for _, t := range req.Tools {
+			switch strings.ToLower(strings.TrimSpace(t.Name)) {
+			case "read", "grep", "glob", "ls", "read_file", "grep_search":
+				hasReadSearch = true
+			case "edit", "write", "multiedit", "notebookedit", "edit_file", "write_file":
+				hasMutate = true
+			}
+		}
+		if hasReadSearch && !hasMutate {
+			return AgentRoleSubagent
+		}
+	}
+
 	// Utility calls with no tools and tiny output caps (e.g. topic/title classifiers)
 	if len(req.Tools) == 0 && req.MaxTokens > 0 && req.MaxTokens <= 512 && len(req.Messages) <= 2 {
 		return AgentRoleSubagent
 	}
 	return AgentRoleMain
+}
+
+func extractToolUsePath(toolName string, rawInput json.RawMessage) string {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "read", "read_file", "glob", "grep", "edit", "write", "multiedit", "notebookedit", "edit_file", "write_file":
+		var in struct {
+			FilePath string `json:"file_path"`
+			Path     string `json:"path"`
+		}
+		if err := json.Unmarshal(rawInput, &in); err != nil {
+			return ""
+		}
+		if p := strings.TrimSpace(in.FilePath); p != "" {
+			return p
+		}
+		return strings.TrimSpace(in.Path)
+	}
+	return ""
 }
 
 // DetectANSI inspects a string for ANSI escape sequences and returns (sequenceCount, totalANSIBytes).

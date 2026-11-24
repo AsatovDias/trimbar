@@ -294,7 +294,7 @@
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
     return String(Math.round(n));
   }
-  function fmtUSD(v) { return '$' + Number(v || 0).toFixed(4); }
+  function fmtUSD(v, estimated) { return (estimated ? '~$' : '$') + Number(v || 0).toFixed(4); }
   function shortModel(m) {
     if (!m) return '(unknown)';
     return m.replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -319,7 +319,7 @@
   function hideTooltip() { tooltip.style.display = 'none'; }
 
   function renderStats(s) {
-    $('kpiSpend').textContent = fmtUSD(s.total_cost_usd);
+    $('kpiSpend').textContent = fmtUSD(s.total_cost_usd, s.has_estimated_cost);
     $('kpiReqs').textContent = `${s.total_requests} reqs (main ${s.main_agent_requests} · sub ${s.subagent_requests} · err ${s.error_requests}) · avg ${Math.round(s.avg_latency_ms || 0)}ms`;
 
     const hitPct = (s.cache_hit_ratio || 0) * 100;
@@ -350,7 +350,7 @@
     $('modelTable').innerHTML = models.length === 0
       ? '<div class="empty">No model data yet.</div>'
       : `<table><thead><tr><th>Model</th><th class="num">Reqs</th><th class="num">Read</th><th class="num">Write</th><th class="num">Hit%</th><th class="num">Cost</th></tr></thead><tbody>` +
-        models.map(m => `<tr><td>${esc(shortModel(m.model))}</td><td class="num">${m.requests}</td><td class="num">${fmtTokens(m.cache_read_tokens)}</td><td class="num">${fmtTokens(m.cache_creation_tokens)}</td><td class="num">${((m.cache_hit_ratio||0)*100).toFixed(1)}%</td><td class="num c-green">${fmtUSD(m.cost_usd)}</td></tr>`).join('') +
+        models.map(m => `<tr><td>${esc(shortModel(m.model))}</td><td class="num">${m.requests}</td><td class="num">${fmtTokens(m.cache_read_tokens)}</td><td class="num">${fmtTokens(m.cache_creation_tokens)}</td><td class="num">${((m.cache_hit_ratio||0)*100).toFixed(1)}%</td><td class="num c-green">${fmtUSD(m.cost_usd, m.estimated)}</td></tr>`).join('') +
         '</tbody></table>';
 
     // By repo/branch table
@@ -358,7 +358,7 @@
     $('repoTable').innerHTML = rbs.length === 0
       ? '<div class="empty">No repository data yet.</div>'
       : `<table><thead><tr><th>Repo</th><th>Branch</th><th class="num">Reqs</th><th class="num">Hit%</th><th class="num">Cost</th></tr></thead><tbody>` +
-        rbs.map(r => `<tr><td>${esc(r.repo)}</td><td style="color:var(--muted)">${esc(r.branch)}</td><td class="num">${r.requests}</td><td class="num">${((r.cache_hit_ratio||0)*100).toFixed(1)}%</td><td class="num c-green">${fmtUSD(r.cost_usd)}</td></tr>`).join('') +
+        rbs.map(r => `<tr><td>${esc(r.repo)}</td><td style="color:var(--muted)">${esc(r.branch)}</td><td class="num">${r.requests}</td><td class="num">${((r.cache_hit_ratio||0)*100).toFixed(1)}%</td><td class="num c-green">${fmtUSD(r.cost_usd, r.estimated)}</td></tr>`).join('') +
         '</tbody></table>';
   }
 
@@ -402,7 +402,7 @@
       <div class="detail-grid">
         <div class="detail-kv"><span>Repository</span>${esc(t.git_repo || '(no-git)')}@${esc(t.git_branch || '-')}</div>
         <div class="detail-kv"><span>Tokens (in / read / write / out)</span>${fmtTokens(t.input_tokens)} / ${fmtTokens(t.cache_read_tokens)} / ${fmtTokens(t.cache_creation_tokens)} / ${fmtTokens(t.output_tokens)}</div>
-        <div class="detail-kv"><span>Cache Hit &amp; Cost</span>${hit}% · <span class="c-green">${fmtUSD(t.cost_usd)}</span> (${t.latency_ms}ms)</div>
+        <div class="detail-kv"><span>Cache Hit &amp; Cost</span>${hit}% · <span class="c-green">${fmtUSD(t.cost_usd, t.cost_estimated)}</span> (${t.latency_ms}ms)</div>
         <div class="detail-kv"><span>Active Trimming</span>${t.trimmed_tokens > 0 ? `<span class="c-green">-${fmtTokens(t.trimmed_tokens)} tok (${fmtUSD(t.trimmed_savings_usd)})</span>` : '0 tok (Shadow Mode)'}</div>
         <div class="detail-kv"><span>Resilience</span>retries: ${t.retry_count || 0} · failover: ${t.failover_used ? 'YES' : 'no'}</div>
         <div class="detail-kv"><span>Context Waste</span>dup reads: ${t.duplicate_read_count || 0} · ANSI seqs: ${t.ansi_sequence_count || 0}</div>
@@ -450,7 +450,7 @@
             </div>
             <div class="fg-bar">${barsHTML}</div>
             <div class="fg-right">
-              <span class="c-green">${fmtUSD(t.cost_usd)}</span> · ${hit}% hit
+              <span class="c-green">${fmtUSD(t.cost_usd, t.cost_estimated)}</span> · ${hit}% hit
               <div style="margin-top:2px;">${flags}</div>
             </div>
           </div>`;
