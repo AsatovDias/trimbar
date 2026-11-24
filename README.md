@@ -175,6 +175,19 @@ Inspect your captured sessions at any time:
 
 ---
 
+## CLI Commands Reference
+
+| Command | Description | Key Flags |
+| :--- | :--- | :--- |
+| `trimbar start` | Start the local zero-buffer reverse proxy and offline Web UI (`/ui`) | `--trim`, `--port` (`-p`), `--host`, `--upstream`, `--mock`, `--db` |
+| `trimbar stats` | Show aggregated spend, cache hit rate, model/branch breakdown & trimmed savings | `--since` (`24h`, `7d`, `all`), `--repo`, `--branch`, `--session`, `--json`, `--db` |
+| `trimbar inspect` | Inspect context composition, recent turns, duplicate `Read` hotspots & cache anomalies | `--limit` (`-n`), `--repo`, `--branch`, `--session`, `--json`, `--db` |
+| `trimbar demo` | Run a simulated 6-turn Claude Code session locally (no API key required) | `--trim`, `--proxy`, `--cwd`, `--db` |
+| `trimbar reset` | Clear all recorded request logs from the local SQLite database | `--yes` (`-y`), `--db` |
+| `trimbar version` | Print Trimbar version and Go runtime info | — |
+
+---
+
 ## Cache-Safe Active Trimming (`--trim`)
 
 Trimbar's primary job is **observability and cache-miss diagnostics**: by default it runs in **Shadow Mode** (`--trim=false`) and never modifies your requests.

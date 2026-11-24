@@ -223,6 +223,8 @@ func newStartCmd() *cobra.Command {
 				"",
 				styleMuted.Render("Run Claude Code through Trimbar:"),
 				styleTitle.Render(usageHint),
+				"",
+				fmt.Sprintf("%s %s", styleMuted.Render("Commands:"), styleMuted.Render("trimbar stats | trimbar inspect | trimbar demo | trimbar reset")),
 			}
 			fmt.Println(styleBanner.Render(strings.Join(bannerLines, "\n")))
 			if warn := nonLoopbackSecurityWarning(cfg.Host); warn != "" {
