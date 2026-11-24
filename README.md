@@ -11,6 +11,48 @@ Trimbar sits transparently between the local [Claude Code](https://docs.anthropi
 
 ---
 
+## How Trimbar Works (in Plain English)
+
+Think of Trimbar as a **local X-ray scanner and smart filter** running right on your machine.
+
+You point Claude Code at Trimbar with a single environment variable (`ANTHROPIC_BASE_URL=http://127.0.0.1:8787`). Every message still goes straight to your own Anthropic account and streams back word-for-word with zero delay (`<5ms`), while Trimbar inspects what is actually inside each turn — and, when you turn on `--trim`, filters out obvious junk *before* you pay for it.
+
+### Without Trimbar vs With Trimbar
+
+```text
+WITHOUT TRIMBAR
+───────────────
+Claude Code ──► reads handler.go 4× unchanged + attaches colored Bash test logs (\x1b[31m...)
+                  │
+                  ▼
+          api.anthropic.com
+            • Pays for all 4 copies + raw ANSI noise every turn
+            • Burns through your 5-hour Pro/Max limit (or API balance)
+            • Silent mid-session cache miss spikes cost 5× — you never know why
+            • Hits 429 / 529 overload → session stalls or drops
+
+
+WITH TRIMBAR  (ANTHROPIC_BASE_URL=http://127.0.0.1:8787)
+────────────────────────────────────────────────────────
+Claude Code ──► Trimbar (127.0.0.1:8787, local binary) ──► api.anthropic.com
+                  │
+                  ├─ Frozen prefix (up to last cache_control): UNTOUCHED byte-for-byte
+                  ├─ After cache_control (--trim):
+                  │    • Replaces redundant Read copies with a 1-line note
+                  │    • Strips raw ANSI color codes from Bash output
+                  ├─ On 429 / 529 before stream starts:
+                  │    • Auto-retries (Retry-After / 1s→2s) or fails over to backup key
+                  └─ Live Context Flamegraph in your browser → http://127.0.0.1:8787/ui
+```
+
+### 3 Things You Get Immediately
+
+1. **See what's eating your context:** Open `http://127.0.0.1:8787/ui` (or run `trimbar inspect`) to see a visual **Context Flamegraph** of every turn — how much is System Prompt, Tools, Tool Outputs, Chat History, duplicate file reads, or ANSI noise, grouped automatically by your Git repo and branch.
+2. **Stretch your 5-hour limit & API budget safely:** Turn on `trimbar start --trim` to strip ANSI terminal garbage and deduplicate unchanged file re-reads *strictly after* Anthropic's `cache_control` boundary — so you save real tokens without ever breaking your prompt cache.
+3. **Keep long sessions alive on `429` / `529`:** When Anthropic briefly rate-limits or overloads before a stream begins, Trimbar quietly retries with backoff or fails over to a backup upstream/key so your coding flow isn't interrupted.
+
+---
+
 ## The Problem
 
 When running Claude Code on real repositories, token burn and latency spikes are hard to diagnose:
