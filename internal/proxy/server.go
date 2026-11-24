@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/trimbar/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/config"
 )
 
 // Server wraps the local Trimbar HTTP reverse-proxy server and routing.

@@ -4,12 +4,13 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/trimbar/trimbar/internal/storage"
+	"github.com/AsatovDias/trimbar/internal/storage"
 )
 
 //go:embed static/index.html
@@ -18,11 +19,13 @@ var indexHTML []byte
 // Handler serves the embedded offline Web UI (/ui) and JSON telemetry APIs
 // (/api/stats, /api/inspect) backed by the local SQLite repository.
 type Handler struct {
-	repo *storage.Repository
-	mux  *http.ServeMux
+	repo        *storage.Repository
+	allowedHost string
+	mux         *http.ServeMux
 }
 
 // NewHandler creates a local Web UI http.Handler backed by repo.
+// By default it enforces DNS-rebinding protection, accepting only localhost / 127.0.0.1 / ::1 Host headers.
 func NewHandler(repo *storage.Repository) *Handler {
 	h := &Handler{
 		repo: repo,
@@ -35,9 +38,43 @@ func NewHandler(repo *storage.Repository) *Handler {
 	return h
 }
 
-// ServeHTTP dispatches /ui, /api/stats, and /api/inspect requests.
+// SetAllowedHost optionally registers an explicit non-loopback bind host (e.g. a LAN IP)
+// that is permitted alongside localhost / 127.0.0.1 / ::1. Wildcards (0.0.0.0, ::) are ignored.
+func (h *Handler) SetAllowedHost(host string) {
+	cleaned := strings.ToLower(strings.TrimSpace(strings.Trim(host, "[]")))
+	if cleaned == "" || cleaned == "0.0.0.0" || cleaned == "::" {
+		return
+	}
+	h.allowedHost = cleaned
+}
+
+// ServeHTTP enforces DNS-rebinding protection via the HTTP Host header before
+// dispatching /ui, /api/stats, and /api/inspect requests.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !isAllowedWebUIHost(r.Host, h.allowedHost) {
+		writeJSONError(w, http.StatusForbidden, "forbidden: invalid Host header (DNS rebinding protection)")
+		return
+	}
 	h.mux.ServeHTTP(w, r)
+}
+
+func isAllowedWebUIHost(hostHeader, extraAllowed string) bool {
+	raw := strings.TrimSpace(hostHeader)
+	if raw == "" {
+		return false
+	}
+	host := raw
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	if extraAllowed != "" && host == extraAllowed {
+		return true
+	}
+	return false
 }
 
 func (h *Handler) handleUI(w http.ResponseWriter, r *http.Request) {

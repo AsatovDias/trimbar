@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/trimbar/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/config"
 )
 
 func almostEqual(a, b, tol float64) bool {
@@ -103,7 +103,7 @@ func TestFallbackSonnetPricingForUnknownModel(t *testing.T) {
 		CacheReadInputTokens: 10_000, // $0.003 at Sonnet fallback ($0.30/MTok)
 	}
 
-	got := calc.CalculateCost("claude-sonnet-5-20270101", usage)
+	got := calc.CalculateCost("claude-future-9-20290101", usage)
 	if got.PricingKnown {
 		t.Errorf("expected PricingKnown=false for unknown future model")
 	}
@@ -114,12 +114,12 @@ func TestFallbackSonnetPricingForUnknownModel(t *testing.T) {
 		t.Errorf("fallback TotalCostUSD = %v, want 0.048", got.TotalCostUSD)
 	}
 
-	shadow := calc.CalculateShadowSavings("claude-sonnet-5-20270101", usage, 1_000)
+	shadow := calc.CalculateShadowSavings("claude-future-9-20290101", usage, 1_000)
 	if !shadow.Estimated || shadow.HonestSavingsUSD <= 0 {
 		t.Errorf("expected Estimated=true and HonestSavingsUSD>0, got %+v", shadow)
 	}
 
-	trimSave := calc.CalculateTrimmedSavings("claude-sonnet-5-20270101", 10_000)
+	trimSave := calc.CalculateTrimmedSavings("claude-future-9-20290101", 10_000)
 	if !almostEqual(trimSave, 0.03, 1e-9) {
 		t.Errorf("fallback CalculateTrimmedSavings = %v, want 0.03", trimSave)
 	}

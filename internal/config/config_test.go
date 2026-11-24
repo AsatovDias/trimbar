@@ -15,6 +15,9 @@ func TestLookupPricing(t *testing.T) {
 		wantInput float64
 		wantRead  float64
 	}{
+		{"claude-opus-5-20270101", true, 5.00, 0.50},
+		{"claude-sonnet-5-20270101", true, 3.00, 0.30},
+		{"claude-haiku-5-20270101", true, 1.00, 0.10},
 		{"claude-sonnet-4-20250514", true, 3.00, 0.30},
 		{"claude-sonnet-4-5-20250929", true, 3.00, 0.30},
 		{"claude-3-7-sonnet-20250219", true, 3.00, 0.30},

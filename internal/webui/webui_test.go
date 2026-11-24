@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
-	"github.com/trimbar/trimbar/internal/config"
-	"github.com/trimbar/trimbar/internal/proxy"
-	"github.com/trimbar/trimbar/internal/storage"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/proxy"
+	"github.com/AsatovDias/trimbar/internal/storage"
 )
 
 func seedTestRepo(t *testing.T) (*storage.DB, *storage.Repository) {
@@ -189,5 +189,37 @@ func TestWebUIServesOfflineDashboardAndAPIs(t *testing.T) {
 	}
 	if telemetryEvents != 0 {
 		t.Errorf("expected 0 telemetry events for /, /favicon.ico, /ui, /api/*, got %d", telemetryEvents)
+	}
+}
+
+func TestWebUIDNSRebindingProtection(t *testing.T) {
+	db, repo := seedTestRepo(t)
+	defer db.Close()
+
+	ui := NewHandler(repo)
+
+	allowedHosts := []string{"127.0.0.1:8787", "localhost:8787", "[::1]:8787", "localhost"}
+	for _, host := range allowedHosts {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8787/api/stats", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		ui.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("Host %q -> status %d, want 200", host, rec.Code)
+		}
+	}
+
+	foreignHosts := []string{"evil.com:8787", "attacker.localhost.evil.com:8787", "192.168.1.55:8787", ""}
+	endpoints := []string{"/ui", "/api/stats", "/api/inspect"}
+	for _, host := range foreignHosts {
+		for _, ep := range endpoints {
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8787"+ep, nil)
+			req.Host = host
+			rec := httptest.NewRecorder()
+			ui.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("DNS rebinding check Host=%q path=%q -> status %d, want 403 Forbidden", host, ep, rec.Code)
+			}
+		}
 	}
 }

@@ -15,10 +15,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/trimbar/trimbar/internal/config"
-	"github.com/trimbar/trimbar/internal/gitmeta"
-	"github.com/trimbar/trimbar/internal/proxy"
-	"github.com/trimbar/trimbar/internal/storage"
+	"github.com/AsatovDias/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/gitmeta"
+	"github.com/AsatovDias/trimbar/internal/proxy"
+	"github.com/AsatovDias/trimbar/internal/storage"
 )
 
 const demoScenarioHeader = "X-Trimbar-Demo-Turn"

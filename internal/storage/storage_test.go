@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
 )
 
 func TestOpenEnablesWALMode(t *testing.T) {

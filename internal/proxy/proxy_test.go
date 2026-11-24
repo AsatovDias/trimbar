@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/trimbar/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/config"
 )
 
 // TestStreamingZeroBufferingLatency verifies that SSE chunks are forwarded immediately
@@ -957,4 +957,123 @@ func TestNoRetryAfter200OrMidStreamFailure(t *testing.T) {
 			t.Errorf("telemetry failover/retry = (%v, %d), want (true, 1)", ev.FailoverUsed, ev.RetryCount)
 		}
 	})
+}
+
+// TestFailoverStripsOriginalAuthHeaders verifies that failing over to fallback_upstream
+// ALWAYS strips BOTH x-api-key and Authorization from the original request so primary
+// credentials (API keys or OAuth Bearer tokens) never leak to the fallback host.
+func TestFailoverStripsOriginalAuthHeaders(t *testing.T) {
+	tests := []struct {
+		name           string
+		fallbackAPIKey string
+		wantFallbackX  string
+	}{
+		{
+			name:           "with fallback_api_key replaces x-api-key and strips Authorization",
+			fallbackAPIKey: "sk-ant-fallback-only",
+			wantFallbackX:  "sk-ant-fallback-only",
+		},
+		{
+			name:           "without fallback_api_key strips both x-api-key and Authorization",
+			fallbackAPIKey: "",
+			wantFallbackX:  "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(529)
+				_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`)
+			}))
+			defer primary.Close()
+
+			var (
+				gotAuth   string
+				gotAPIKey string
+			)
+			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				gotAPIKey = r.Header.Get("x-api-key")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"id":"msg_fb_sec","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":10,"output_tokens":5}}`)
+			}))
+			defer fallback.Close()
+
+			cfg := config.Default()
+			cfg.UpstreamURL = primary.URL
+			cfg.FallbackUpstream = fallback.URL
+			cfg.FallbackAPIKey = tc.fallbackAPIKey
+			cfg.MaxRetries = 2
+
+			srv, err := NewServer(cfg)
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+			proxySrv := httptest.NewServer(srv.ServeMux())
+			defer proxySrv.Close()
+
+			req, _ := http.NewRequest(
+				http.MethodPost,
+				proxySrv.URL+"/v1/messages",
+				strings.NewReader(`{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`),
+			)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer sk-ant-oauth-secret-do-not-leak")
+			req.Header.Set("x-api-key", "sk-ant-primary-secret-do-not-leak")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			_, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
+			}
+			if gotAuth != "" {
+				t.Errorf("Authorization header leaked to fallback upstream: got %q, want empty", gotAuth)
+			}
+			if gotAPIKey != tc.wantFallbackX {
+				t.Errorf("fallback x-api-key = %q, want %q", gotAPIKey, tc.wantFallbackX)
+			}
+		})
+	}
+}
+
+func TestOnCompletePanicIsRecovered(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"msg_panic_ok","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":5,"output_tokens":5}}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.UpstreamURL = upstream.URL
+	srv, err := NewServer(cfg, WithOnComplete(func(ev ProxyEvent) {
+		panic("simulated telemetry sink panic")
+	}))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	proxySrv := httptest.NewServer(srv.ServeMux())
+	defer proxySrv.Close()
+
+	resp, err := http.Post(
+		proxySrv.URL+"/v1/messages",
+		"application/json",
+		strings.NewReader(`{"model":"claude-sonnet-4-20250514","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`),
+	)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "msg_panic_ok") {
+		t.Errorf("unexpected response after recovered panic: status=%d body=%s", resp.StatusCode, string(body))
+	}
 }

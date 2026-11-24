@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
 )
 
 // RequestLog represents a single persisted Anthropic proxy request record.

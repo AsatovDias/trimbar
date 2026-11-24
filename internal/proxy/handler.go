@@ -8,14 +8,15 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
-	"github.com/trimbar/trimbar/internal/config"
-	"github.com/trimbar/trimbar/internal/pricing"
-	"github.com/trimbar/trimbar/internal/trimmer"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/pricing"
+	"github.com/AsatovDias/trimbar/internal/trimmer"
 )
 
 const (
@@ -223,6 +224,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		inspectDone = make(chan struct{})
 		go func() {
 			defer close(inspectDone)
+			defer func() {
+				if rec := recover(); rec != nil {
+					fmt.Fprintf(os.Stderr, "[trimbar] WARN: panic recovered during request inspection: %v\n", rec)
+				}
+			}()
 			if res, err := anthropic.InspectRequest(bodyBytes); err == nil {
 				inspectRes = res
 			}
@@ -350,7 +356,9 @@ func (h *Handler) emit(ev ProxyEvent) {
 	// Defensive guard: a failing telemetry sink (e.g. read-only SQLite) must never
 	// crash the proxy handler after the user's response has been delivered.
 	defer func() {
-		_ = recover()
+		if rec := recover(); rec != nil {
+			fmt.Fprintf(os.Stderr, "[trimbar] WARN: panic recovered during telemetry callback: %v\n", rec)
+		}
 	}()
 	h.onComplete(ev)
 }
@@ -410,8 +418,14 @@ func (h *Handler) doUpstreamWithRetry(
 		if isMessages {
 			outReq.Header.Del("Content-Length")
 		}
-		if useFallback && strings.TrimSpace(h.fallbackAPIKey) != "" {
-			outReq.Header.Set("x-api-key", h.fallbackAPIKey)
+		if useFallback {
+			// Never leak primary credentials (OAuth Bearer token or primary API key)
+			// to a fallback upstream.
+			outReq.Header.Del("x-api-key")
+			outReq.Header.Del("Authorization")
+			if key := strings.TrimSpace(h.fallbackAPIKey); key != "" {
+				outReq.Header.Set("x-api-key", key)
+			}
 		}
 		outReq.Host = base.Host
 		outReq.ContentLength = contentLength

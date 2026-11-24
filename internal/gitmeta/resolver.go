@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
 )
 
 const defaultCacheTTL = 3 * time.Second

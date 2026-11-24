@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/trimbar/trimbar/internal/config"
-	"github.com/trimbar/trimbar/internal/storage"
+	"github.com/AsatovDias/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/storage"
 )
 
 func TestRunDemoEndToEnd(t *testing.T) {

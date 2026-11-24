@@ -1,7 +1,7 @@
 package pricing
 
 import (
-	"github.com/trimbar/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/config"
 )
 
 const tokensPerMillion = 1_000_000.0

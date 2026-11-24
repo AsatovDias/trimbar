@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
 )
 
 func TestExtractCWD(t *testing.T) {

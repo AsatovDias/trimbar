@@ -67,7 +67,7 @@ When running Claude Code on real repositories, token burn and latency spikes are
 - **Zero-Buffer SSE Forwarding:** Streams chunks from Anthropic to Claude Code with immediate `http.Flusher` writes (`<5ms` proxy overhead) while asynchronously parsing usage events in a separate goroutine.
 - **Exact Prompt Cache & Cost Accounting:** Extracts `input_tokens`, `cache_creation_input_tokens` (5m & 1h TTL), `cache_read_input_tokens`, and `output_tokens` from Anthropic SSE streams and non-streaming responses, computing exact USD spend, net cache savings, and **honest shadow savings** weighted by your actual blended prompt rate. Unknown or future models automatically fall back to Sonnet-tier estimates marked with `~$` instead of reporting `$0`.
 - **Context Inspector:** Detects redundant `Read` calls (ignoring legitimate re-reads after `Edit`/`Write` and distinct `offset`/`limit` slices) and ANSI CSI/OSC escape sequence overhead inside `tool_result` blocks.
-- **Cache-Safe Active Trimming (`--trim`):** Opt-in outbound request optimizer that strips ANSI codes and deduplicates redundant full-file `Read` results strictly **after** the last `cache_control` breakpoint — preserving the frozen prompt cache prefix byte-for-byte, verifying the full uncompacted original `tool_result` (`>= 200` chars) is physically present before deduplicating, and tracking actual trimmed tokens and USD saved.
+- **Cache-Safe Active Trimming (`--trim`, opt-in pre-cache turn hygiene):** Alongside Trimbar's primary focus on prompt cache-miss diagnostics and context profiling, enabling `--trim` cleans freshly appended `tool_result` blocks *before* they enter the prompt cache (strictly **after** the frozen `cache_control` prefix) — stripping ANSI codes and deduplicating verified full-file `Read` results (`>= 200` chars) without ever mutating cached prefixes.
 - **Embedded Offline Web UI (`/ui`):** Built-in dark dashboard embedded directly into the single binary via `go:embed` (zero external CDNs) with live KPI cards, `/api/stats` & `/api/inspect` endpoints, and an interactive **Context Flamegraph** showing System, Tools, Tool Outputs, Dup Read/Trimmed waste, ANSI noise, and Chat History per turn.
 - **Auto-Retry & Failover (`429` / `529`):** Automatically recovers from transient Anthropic rate limits (`429`) and overload (`529`) before SSE streaming starts — retrying up to 2× with `Retry-After` / exponential backoff (`1s → 2s`) or instantly failing over to a configured `fallback_upstream` / `fallback_api_key`.
 - **Cache Miss Anomaly Detection:** Tracks consecutive main-agent turns per session and flags sudden drops in cache hit rate accompanied by large cache-creation spikes.
@@ -126,9 +126,15 @@ Invoke-WebRequest -Uri "https://github.com/AsatovDias/trimbar/releases/latest/do
 .\trimbar.exe version
 ```
 
-### Build from Source
+### Install via `go install`
 
 Requires **Go 1.23+** (no C compiler / CGO required):
+
+```bash
+go install github.com/AsatovDias/trimbar/cmd/trimbar@latest
+```
+
+### Build from Source
 
 ```bash
 git clone https://github.com/AsatovDias/trimbar.git
@@ -169,9 +175,9 @@ Inspect your captured sessions at any time:
 
 ## Cache-Safe Active Trimming (`--trim`)
 
-By default, Trimbar runs in **Shadow Mode** (`--trim=false`) and never modifies your requests.
+Trimbar's primary job is **observability and cache-miss diagnostics**: by default it runs in **Shadow Mode** (`--trim=false`) and never modifies your requests.
 
-When you opt in with `trimbar start --trim` (or `trim_enabled = true` in `~/.trimbar/config.toml`), Trimbar trims waste from outbound `POST /v1/messages` payloads without breaking Anthropic Prompt Caching:
+When you explicitly opt in with `trimbar start --trim` (or `trim_enabled = true` in `~/.trimbar/config.toml`), Trimbar performs **pre-cache turn hygiene** on freshly appended `tool_result` blocks *before* they enter Anthropic's prompt cache — without ever touching previously cached turns:
 
 1. **Frozen Prefix Guarantee:** Trimbar locates the last `cache_control` marker in `messages` (as well as `system` and `tools`). Every byte at or before that boundary is preserved **verbatim** — zero re-serialization, zero cache invalidations.
 2. **Post-Cache Cleanup Only:** On `tool_result` blocks strictly **after** the last `cache_control` marker:

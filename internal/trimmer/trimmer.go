@@ -8,7 +8,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
 )
 
 // MinOriginalReadChars is the minimum character length an earlier Read tool_result

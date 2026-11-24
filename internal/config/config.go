@@ -52,6 +52,28 @@ type Config struct {
 // Keys are canonical model prefixes matched by exact match first, then longest prefix.
 func DefaultPricingTable() map[string]ModelPricing {
 	return map[string]ModelPricing{
+		// Claude 5.x generation (prefix match for future 5.x snapshots)
+		"claude-opus-5": {
+			InputPerMTok:        5.00,
+			OutputPerMTok:       25.00,
+			CacheWritePerMTok:   6.25,
+			CacheWrite1hPerMTok: 10.00,
+			CacheReadPerMTok:    0.50,
+		},
+		"claude-sonnet-5": {
+			InputPerMTok:        3.00,
+			OutputPerMTok:       15.00,
+			CacheWritePerMTok:   3.75,
+			CacheWrite1hPerMTok: 6.00,
+			CacheReadPerMTok:    0.30,
+		},
+		"claude-haiku-5": {
+			InputPerMTok:        1.00,
+			OutputPerMTok:       5.00,
+			CacheWritePerMTok:   1.25,
+			CacheWrite1hPerMTok: 2.00,
+			CacheReadPerMTok:    0.10,
+		},
 		// Claude 4.5 / 4.6 Opus ($5 / $25)
 		"claude-opus-4-6": {
 			InputPerMTok:        5.00,

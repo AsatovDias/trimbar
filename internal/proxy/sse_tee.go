@@ -3,11 +3,13 @@ package proxy
 import (
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
 )
 
 const (
@@ -31,6 +33,11 @@ func StreamSSE(w http.ResponseWriter, body io.Reader, contentEncoding string) (a
 
 	go func() {
 		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "[trimbar] WARN: panic recovered during SSE parsing: %v\n", r)
+			}
+		}()
 		parser := anthropic.NewSSEParser()
 		if strings.EqualFold(strings.TrimSpace(contentEncoding), "gzip") {
 			cr := &chanReader{ch: chunks}

@@ -18,15 +18,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
-	"github.com/trimbar/trimbar/internal/anthropic"
-	"github.com/trimbar/trimbar/internal/config"
-	"github.com/trimbar/trimbar/internal/gitmeta"
-	"github.com/trimbar/trimbar/internal/proxy"
-	"github.com/trimbar/trimbar/internal/storage"
-	"github.com/trimbar/trimbar/internal/webui"
+	"github.com/AsatovDias/trimbar/internal/anthropic"
+	"github.com/AsatovDias/trimbar/internal/config"
+	"github.com/AsatovDias/trimbar/internal/gitmeta"
+	"github.com/AsatovDias/trimbar/internal/proxy"
+	"github.com/AsatovDias/trimbar/internal/storage"
+	"github.com/AsatovDias/trimbar/internal/webui"
 )
 
-var version = "0.4.1"
+var version = "0.4.2"
 
 // Lipgloss styles for terminal output.
 var (
@@ -187,6 +187,7 @@ func newStartCmd() *cobra.Command {
 			}
 
 			uiHandler := webui.NewHandler(repo)
+			uiHandler.SetAllowedHost(cfg.Host)
 			srv, err := proxy.NewServer(
 				cfg,
 				proxy.WithOnComplete(onComplete),
