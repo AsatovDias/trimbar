@@ -199,6 +199,7 @@ func runDemo(ctx context.Context, cfg *config.Config, existingProxyURL, workDir 
 	fmt.Println(styleOK.Render("Demo session complete!") + " " + styleMuted.Render("Explore your captured telemetry:"))
 	fmt.Println("  " + styleTitle.Render("trimbar stats"))
 	fmt.Println("  " + styleTitle.Render("trimbar inspect"))
+	fmt.Println("  " + styleMuted.Render("trimbar reset --yes   (clear demo data when ready)"))
 	return nil
 }
 

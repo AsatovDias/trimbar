@@ -190,6 +190,44 @@ func NewRepository(db *DB) *Repository {
 	return &Repository{db: db}
 }
 
+// CountRequests returns the total number of rows currently stored in the requests table.
+func (r *Repository) CountRequests(ctx context.Context) (int64, error) {
+	var count int64
+	if err := r.db.sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests;`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count requests: %w", err)
+	}
+	return count, nil
+}
+
+// ClearRequests deletes all rows from the requests table and resets the autoincrement counter.
+// It returns the number of deleted rows.
+func (r *Repository) ClearRequests(ctx context.Context) (int64, error) {
+	tx, err := r.db.sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin clear tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM requests;`)
+	if err != nil {
+		return 0, fmt.Errorf("delete requests: %w", err)
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	// Reset AUTOINCREMENT sequence cleanly if sqlite_sequence exists.
+	_, _ = tx.ExecContext(ctx, `DELETE FROM sqlite_sequence WHERE name = 'requests';`)
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit clear tx: %w", err)
+	}
+	_, _ = r.db.sqlDB.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE);`)
+	return deleted, nil
+}
+
 // InsertRequest stores a RequestLog entry and returns its assigned row ID.
 func (r *Repository) InsertRequest(ctx context.Context, rec *RequestLog) (int64, error) {
 	if rec == nil {

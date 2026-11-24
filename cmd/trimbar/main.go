@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -110,6 +111,7 @@ func newRootCmd() *cobra.Command {
 		newStatsCmd(),
 		newInspectCmd(),
 		newDemoCmd(),
+		newResetCmd(),
 		newVersionCmd(),
 	)
 	return root
@@ -369,6 +371,71 @@ func newInspectCmd() *cobra.Command {
 	cmd.Flags().IntVarP(&limit, "limit", "n", 15, "Number of recent turns to inspect")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Path to SQLite database")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output report as JSON")
+	return cmd
+}
+
+func newResetCmd() *cobra.Command {
+	var (
+		yes    bool
+		dbPath string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Clear all recorded request logs from the local SQLite database",
+		Long: `Clears all rows from the requests table in ~/.trimbar/trimbar.db (or --db).
+Useful for wiping simulated trimbar demo records before connecting real Claude Code sessions.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			if dbPath != "" {
+				cfg.DBPath = dbPath
+			}
+
+			db, err := storage.Open(cfg.DBPath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			repo := storage.NewRepository(db)
+			ctx := context.Background()
+			count, err := repo.CountRequests(ctx)
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if count == 0 {
+				fmt.Fprintf(out, "%s\n", styleMuted.Render("Database is already empty (0 requests)."))
+				return nil
+			}
+
+			if !yes {
+				fmt.Fprintf(out, "Clear %d recorded request(s) from %s? [y/N]: ", count, cfg.DBPath)
+				reader := bufio.NewReader(cmd.InOrStdin())
+				line, _ := reader.ReadString('\n')
+				ans := strings.ToLower(strings.TrimSpace(line))
+				if ans != "y" && ans != "yes" {
+					fmt.Fprintf(out, "%s\n", styleMuted.Render("Aborted."))
+					return nil
+				}
+			}
+
+			deleted, err := repo.ClearRequests(ctx)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "%s Cleared %d request(s) from %s.\n",
+				styleOK.Render("✓"), deleted, cfg.DBPath)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip interactive confirmation prompt")
+	cmd.Flags().StringVar(&dbPath, "db", "", "Path to SQLite database (default ~/.trimbar/trimbar.db)")
 	return cmd
 }
 

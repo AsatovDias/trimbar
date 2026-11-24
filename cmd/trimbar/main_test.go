@@ -203,3 +203,96 @@ func TestSQLiteWriteFailureDoesNotBreakProxyResponse(t *testing.T) {
 		t.Errorf("expected SQLite warning to be logged, got %q", warnBuf.String())
 	}
 }
+
+func TestResetCommand(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "reset_test.db")
+	seed := func(n int) {
+		db, err := storage.Open(dbPath)
+		if err != nil {
+			t.Fatalf("storage.Open: %v", err)
+		}
+		defer db.Close()
+		repo := storage.NewRepository(db)
+		for i := 0; i < n; i++ {
+			if _, err := repo.InsertRequest(context.Background(), &storage.RequestLog{
+				Timestamp:  time.Now().UTC(),
+				Method:     "POST",
+				Path:       "/v1/messages",
+				StatusCode: 200,
+				Model:      "claude-sonnet-4-20250514",
+			}); err != nil {
+				t.Fatalf("InsertRequest: %v", err)
+			}
+		}
+	}
+	countRows := func() int64 {
+		db, err := storage.Open(dbPath)
+		if err != nil {
+			t.Fatalf("storage.Open: %v", err)
+		}
+		defer db.Close()
+		n, err := storage.NewRepository(db).CountRequests(context.Background())
+		if err != nil {
+			t.Fatalf("CountRequests: %v", err)
+		}
+		return n
+	}
+
+	// 1. Declining confirmation ("n") leaves database intact
+	seed(2)
+	var out bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetIn(strings.NewReader("n\n"))
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"reset", "--db", dbPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("reset decline execute: %v", err)
+	}
+	if got := countRows(); got != 2 {
+		t.Errorf("after declining reset, row count = %d, want 2", got)
+	}
+	if !strings.Contains(out.String(), "Aborted") {
+		t.Errorf("expected Aborted output, got %q", out.String())
+	}
+
+	// 2. Accepting confirmation ("y") clears all rows
+	out.Reset()
+	cmd = newRootCmd()
+	cmd.SetIn(strings.NewReader("y\n"))
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"reset", "--db", dbPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("reset confirm execute: %v", err)
+	}
+	if got := countRows(); got != 0 {
+		t.Errorf("after confirming reset, row count = %d, want 0", got)
+	}
+
+	// 3. Running with --yes (-y) clears immediately without interactive input
+	seed(3)
+	out.Reset()
+	cmd = newRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"reset", "-y", "--db", dbPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("reset -y execute: %v", err)
+	}
+	if got := countRows(); got != 0 {
+		t.Errorf("after reset -y, row count = %d, want 0", got)
+	}
+	if !strings.Contains(out.String(), "Cleared 3") {
+		t.Errorf("expected 'Cleared 3' confirmation, got %q", out.String())
+	}
+
+	// 4. Running on an already-empty DB exits cleanly without prompting
+	out.Reset()
+	cmd = newRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"reset", "--db", dbPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("reset empty DB execute: %v", err)
+	}
+	if !strings.Contains(out.String(), "already empty") {
+		t.Errorf("expected 'already empty' output, got %q", out.String())
+	}
+}
